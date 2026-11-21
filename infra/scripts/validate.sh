@@ -105,7 +105,9 @@ docker run -d --name lab-gf-test -p 13000:3000 \
   -e CH_READER_PASSWORD=x -e TELEGRAM_BOT_TOKEN=123:x -e TELEGRAM_CHAT_ID=1 \
   -v "$PWD/obs/grafana/provisioning:/etc/grafana/provisioning:ro" \
   -v "$PWD/obs/grafana/dashboards:/var/lib/grafana-dashboards:ro" "$GF_IMAGE" >/dev/null
-for _ in $(seq 90); do curl -fs http://localhost:13000/api/health >/dev/null 2>&1 && break; sleep 2; done
+ok=0
+for _ in $(seq 90); do curl -fs http://localhost:13000/api/health >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+if [ "$ok" != 1 ]; then echo "Grafana не поднялась:"; docker ps -a --filter name=lab-gf-test; docker logs lab-gf-test 2>&1 | tail -60; exit 1; fi
 sleep 5
 curl -fsS -u "admin:validate" "http://localhost:13000/api/dashboards/uid/lab-apps" | jq -e '.dashboard.panels | length > 5' >/dev/null  # gitleaks:allow — временная Grafana в CI
 curl -fsS -u "admin:validate" "http://localhost:13000/api/datasources/uid/clickhouse" | jq -e '.type == "grafana-clickhouse-datasource"' >/dev/null  # gitleaks:allow — временная Grafana в CI
