@@ -1,0 +1,2 @@
+# Ложные срабатывания: тестовый пароль временной Grafana в CI (infra/scripts/validate.sh), исправлено в fbe9bb0
+58b48f0fc96d034866115bde6c7fa893bdbf16a8:infra/scripts/validate.sh:curl-auth-user:107
