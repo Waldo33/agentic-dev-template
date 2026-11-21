@@ -40,7 +40,7 @@
 
 ## Ошибки
 
-Sentry SDK (стандарт) → Bugsink. Сервер: `@sentry/node` в `instrumentation.ts` + `onRequestError`. Браузер: `@sentry/browser` с `tunnel: '/_/err'`; DSN приходит с сервера при рендере (`layout.tsx`), поэтому образ один для всех окружений. Проект в Bugsink и DSN — `ops.yml set-sentry-dsn`.
+Sentry SDK (стандарт) → Bugsink. Сервер: `@sentry/node` в `instrumentation.ts` + `onRequestError`. Браузер: `@sentry/browser` с `tunnel: '/_/err'`; DSN приходит с сервера при рендере (`layout.tsx`), поэтому образ один для всех окружений. Проект в Bugsink и DSN — `scripts/ops.sh set-sentry-dsn`.
 
 ## Флаги
 

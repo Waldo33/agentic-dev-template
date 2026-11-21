@@ -6,11 +6,11 @@
 
 - [ ] Секреты и переменные GitHub заданы (`APP_HOST`, `OBS_HOST`, `BASE_DOMAIN`, `SSH_PRIVATE_KEY`, `TELEGRAM_*`, `S3_*`, `RESTIC_PASSWORD`, `FLIPT_*`)
 - [ ] Защита `main` от force-push и удаления, environment `production`
-- [ ] DNS: `*` → app, панели → obs (`ops.yml dns-check`)
-- [ ] `provision.yml -f bootstrap=true`, затем повторный прогон с `changed=0`
+- [ ] DNS: `*` → app, панели → obs (`scripts/ops.sh dns-check`)
+- [ ] `scripts/ops.sh provision - bootstrap`, затем повторный прогон с `changed=0`
 - [ ] Первый деплой `hello`, verify зелёный
-- [ ] Пробная тревога пришла (`ops.yml test-alert`), пароли панелей у владельца
-- [ ] Проект `hello` в Bugsink, `ops.yml set-sentry-dsn`
+- [ ] Пробная тревога пришла (`scripts/ops.sh test-alert`), пароли панелей у владельца
+- [ ] Проект `hello` в Bugsink, `scripts/ops.sh set-sentry-dsn`
 - [ ] Репозиторий флагов с `hello/features.yaml`
 - [ ] Первая ночная копия и зелёный `backup-check.yml`
 - [ ] Пройти «Требует проверки» в `docs/gotchas.md`

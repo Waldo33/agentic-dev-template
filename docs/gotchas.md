@@ -24,7 +24,9 @@
 - Postgres локально без Docker: `/usr/lib/postgresql/*/bin/initdb` + `pg_ctl` от пользователя `postgres` (см. `docs/runbooks/local-dev.md`).
 - SSH на серверы из сессии нет — только `ops.yml` и `provision.yml`.
 - `gh run download` из сессии не работает: артефакты лежат в хранилище Azure, оно закрыто. Ошибки — из `gh run view --log-failed`, скриншоты — воспроизведением e2e локально.
-- Настройки репозитория (`is_template`, описание) через API из сессии менять нельзя — только владелец в интерфейсе GitHub.
+- Настройки репозитория (`is_template`, описание, environments, защита веток) и секреты из сессии не меняются — это делает владелец в интерфейсе GitHub по списку из скилла `bootstrap`.
+- `workflow_dispatch` из сессии запрещён («Resource not accessible by integration»): workflow вручную не запустить. Операции — через issue `ops: …` (`scripts/ops.sh`), а `ops.yml` уже своим токеном запускает `pipeline` и `provision`.
+- GraphQL GitHub из сессии закрыт: `gh repo view`, `gh issue list/create`, `gh pr create`, `gh workflow run` не работают. Работают `gh api` (REST), `gh run list/view/watch`.
 
 ## Требует проверки на первом живом развёртывании
 

@@ -1,171 +1,202 @@
-# Операции на проде для агента и владельца: только действия из списка, без произвольных команд.
-#   gh workflow run ops.yml -f action=logs -f app=hello -f arg=300
-# Результат — в логе и сводке запуска. Пароли и секреты в лог не попадают.
+# Операции на проде — только действия из списка, без произвольных команд.
+#
+# Агент (из облачной сессии workflow_dispatch недоступен): issue с заголовком «ops: <действие> [приложение] [аргумент]»,
+# длинный аргумент (SQL, DSN) — в тексте issue. Удобнее: scripts/ops.sh <действие> [приложение] [аргумент].
+# Ответ — комментарием в том же issue, issue закрывается. Владелец — так же или кнопкой Run workflow.
 name: ops
 
 on:
+  issues:
+    types: [opened]
   workflow_dispatch:
     inputs:
       action:
         description: Действие
         type: choice
-        options:
-          - status
-          - logs
-          - restart
-          - rollback
-          - sql-readonly
-          - clickhouse-query
-          - backup-now
-          - set-sentry-dsn
-          - dns-check
-          - test-alert
-          - send-panel-passwords
+        options: [status, logs, restart, rollback, sql-readonly, clickhouse-query, backup-now, set-sentry-dsn, dns-check, test-alert, send-panel-passwords, redeploy, provision]
       app:
-        description: Приложение (для logs, restart, rollback, sql-readonly, set-sentry-dsn)
+        description: Приложение (logs, restart, rollback, sql-readonly, set-sentry-dsn)
         type: string
         default: ""
       arg:
-        description: Аргумент (число строк, sha версии, SQL, DSN)
+        description: Аргумент (строк, sha, SQL, DSN, теги provision или bootstrap)
         type: string
         default: ""
-
-concurrency:
-  group: ops-${{ inputs.action }}-${{ inputs.app }}
-  cancel-in-progress: false
 
 permissions:
   contents: read
   packages: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: ops-${{ github.event.issue.number || github.run_id }}
 
 jobs:
   ops:
+    # Только запросы владельца и соавторов; title/body передаются через env, не подставляются в команды.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (startsWith(github.event.issue.title, 'ops:') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
     runs-on: ubuntu-latest
     environment: production
     env:
-      ACTION: ${{ inputs.action }}
-      APP: ${{ inputs.app }}
-      ARG: ${{ inputs.arg }}
       APP_HOST: ${{ vars.APP_HOST }}
       OBS_HOST: ${{ vars.OBS_HOST }}
       BASE_DOMAIN: ${{ vars.BASE_DOMAIN }}
       TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GH_TOKEN: ${{ github.token }}
+      ISSUE: ${{ github.event.issue.number }}
+      OUT: /tmp/ops.out
     steps:
       - uses: actions/checkout@v4
+      - name: Разобрать запрос
+        env:
+          IN_ACTION: ${{ inputs.action }}
+          IN_APP: ${{ inputs.app }}
+          IN_ARG: ${{ inputs.arg }}
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          if [ -n "$ISSUE" ]; then
+            read -r _ action app arg_short _rest <<< "$TITLE"
+            arg="$(printf '%s' "${BODY:-}" | tr -d '\r')"
+            [ -n "$arg" ] || arg="${arg_short:-}"
+          else
+            action="$IN_ACTION"; app="$IN_APP"; arg="$IN_ARG"
+          fi
+          d="ARG_$(openssl rand -hex 12)"   # случайный разделитель: текст issue не может подменить переменные
+          {
+            echo "ACTION=$action"
+            echo "APP=$app"
+            echo "ARG<<$d"; printf '%s\n' "$arg"; echo "$d"
+          } >> "$GITHUB_ENV"
+
       - name: Проверка ввода
         run: |
+          fail() { echo "❌ $1" | tee "$OUT"; exit 1; }
+          ARG="${ARG%$'\n'}"
+          case "$ACTION" in
+            status|logs|restart|rollback|sql-readonly|clickhouse-query|backup-now|set-sentry-dsn|dns-check|test-alert|send-panel-passwords|redeploy|provision) ;;
+            *) fail "неизвестное действие «$ACTION». Список — docs/runbooks/ops.md" ;;
+          esac
           case "$ACTION" in logs|restart|rollback|sql-readonly|set-sentry-dsn)
-            [[ "$APP" =~ ^[a-z][a-z0-9-]{1,29}$ ]] && [ -d "apps/$APP" ] || { echo "нужно имя приложения из apps/"; exit 1; } ;;
+            [[ "$APP" =~ ^[a-z][a-z0-9-]{1,29}$ ]] && [ -d "apps/$APP" ] || fail "нужно имя приложения из apps/" ;;
           esac
           case "$ACTION" in
-            logs) [[ -z "$ARG" || "$ARG" =~ ^[0-9]{1,5}$ ]] || { echo "arg — число строк"; exit 1; } ;;
-            rollback) [[ "$ARG" =~ ^[0-9a-f]{7,40}$ ]] || { echo "arg — sha версии"; exit 1; } ;;
-            sql-readonly|clickhouse-query) [ -n "$ARG" ] || { echo "arg — SQL"; exit 1; } ;;
-            set-sentry-dsn) [[ "$ARG" =~ ^https://[a-zA-Z0-9]+@[a-zA-Z0-9.-]+/[0-9]+$ ]] || { echo "arg — DSN вида https://ключ@errors.<домен>/N"; exit 1; } ;;
+            logs) [[ -z "$ARG" || "$ARG" =~ ^[0-9]{1,5}$ ]] || fail "аргумент — число строк" ;;
+            rollback) [[ "$ARG" =~ ^[0-9a-f]{7,40}$ ]] || fail "аргумент — sha версии" ;;
+            sql-readonly|clickhouse-query) [ -n "$ARG" ] || fail "SQL — в тексте issue" ;;
+            set-sentry-dsn) [[ "$ARG" =~ ^https://[a-zA-Z0-9]+@[a-zA-Z0-9.-]+/[0-9]+$ ]] || fail "DSN вида https://ключ@errors.<домен>/N" ;;
+            provision) [[ -z "$ARG" || "$ARG" == "bootstrap" || "$ARG" =~ ^[a-z_,]+$ ]] || fail "аргумент — bootstrap или теги через запятую" ;;
           esac
-          [ -n "$APP_HOST" ] || [ "$ACTION" = "dns-check" ] || [ "$ACTION" = "test-alert" ] || { echo "Нет vars.APP_HOST (скилл bootstrap)"; exit 1; }
+          case "$ACTION" in status|logs|restart|rollback|sql-readonly|clickhouse-query|backup-now|set-sentry-dsn|send-panel-passwords)
+            [ -n "$APP_HOST" ] || fail "нет vars.APP_HOST — сначала скилл bootstrap" ;;
+          esac
+          : > "$OUT"
+
       - uses: webfactory/ssh-agent@v0.9.0
-        if: inputs.action != 'dns-check' && inputs.action != 'test-alert'
+        if: contains(fromJSON('["status","logs","restart","rollback","sql-readonly","clickhouse-query","backup-now","set-sentry-dsn","send-panel-passwords"]'), env.ACTION)
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
       - name: Ключи хостов
-        if: inputs.action != 'dns-check' && inputs.action != 'test-alert'
+        if: contains(fromJSON('["status","logs","restart","rollback","sql-readonly","clickhouse-query","backup-now","set-sentry-dsn","send-panel-passwords"]'), env.ACTION)
         run: for h in "$APP_HOST" "$OBS_HOST"; do [ -n "$h" ] && ssh-keyscan -H "$h" >> ~/.ssh/known_hosts 2>/dev/null; done; true
 
-      - name: status
-        if: inputs.action == 'status'
-        run: |
-          for h in "$APP_HOST" "$OBS_HOST"; do
-            [ -n "$h" ] || continue
-            echo "=== $h"
-            ssh "deploy@$h" 'uptime; echo; df -h / | tail -1; free -m | sed -n 2p; echo; docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"; echo; systemctl list-timers lab-backup.timer --no-pager 2>/dev/null | head -3'
-          done | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: logs
-        if: inputs.action == 'logs'
-        run: |
-          n="${ARG:-200}"
-          ssh "deploy@$APP_HOST" "c=\$(docker ps -q --filter label=service=lab-$APP --filter status=running | head -1); [ -n \"\$c\" ] && docker logs --tail $n --timestamps \$c 2>&1 || echo 'контейнер не запущен'"
-
-      - name: restart
-        if: inputs.action == 'restart'
-        run: |
-          ssh "deploy@$APP_HOST" "c=\$(docker ps -q --filter label=service=lab-$APP --filter status=running | head -1); docker restart \$c"
-          sleep 10; curl -fsS "https://$APP.$BASE_DOMAIN/up" | tee -a "$GITHUB_STEP_SUMMARY"
-
       - uses: ruby/setup-ruby@v1
-        if: inputs.action == 'rollback'
+        if: env.ACTION == 'rollback'
         with:
           ruby-version: "3.3"
-      - name: rollback
-        if: inputs.action == 'rollback'
-        working-directory: apps/${{ inputs.app }}
+
+      - name: Выполнить
         env:
           REGISTRY_USER: ${{ github.actor }}
           KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_ARCH: ${{ vars.IMAGE_ARCH || 'amd64' }}
         run: |
-          gem install kamal -v "~> 2.12" --no-document
-          export IMAGE_NAMESPACE="${GITHUB_REPOSITORY_OWNER,,}"
-          kamal rollback "$ARG"
-          curl -fsS "https://$APP.$BASE_DOMAIN/up" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: sql-readonly
-        if: inputs.action == 'sql-readonly'
-        run: |
+          set -o pipefail
+          exec > >(tee -a "$OUT") 2>&1
+          ARG="${ARG%$'\n'}"
           db="${APP//-/_}"
-          printf '%s\n' "$ARG" | ssh "deploy@$APP_HOST" "docker exec -i lab-postgres psql -U ${db}_ro -d $db -v ON_ERROR_STOP=1 -P pager=off -f -" | tee -a "$GITHUB_STEP_SUMMARY"
+          case "$ACTION" in
+            status)
+              for h in "$APP_HOST" "$OBS_HOST"; do
+                [ -n "$h" ] || continue
+                echo "=== $h"
+                ssh "deploy@$h" 'uptime; df -h / | tail -1; free -m | sed -n 2p; docker ps --format "{{.Names}}  {{.Status}}  {{.Image}}"; systemctl list-timers lab-backup.timer --no-pager 2>/dev/null | sed -n 2p'
+              done ;;
+            logs)
+              ssh "deploy@$APP_HOST" "c=\$(docker ps -q --filter label=service=lab-$APP --filter status=running | head -1); [ -n \"\$c\" ] && docker logs --tail ${ARG:-200} --timestamps \$c 2>&1 || echo 'контейнер не запущен'" ;;
+            restart)
+              ssh "deploy@$APP_HOST" "c=\$(docker ps -q --filter label=service=lab-$APP --filter status=running | head -1); docker restart \$c"
+              sleep 10; curl -fsS "https://$APP.$BASE_DOMAIN/up"; echo ;;
+            rollback)
+              gem install kamal -v "~> 2.12" --no-document >/dev/null
+              export IMAGE_NAMESPACE="${GITHUB_REPOSITORY_OWNER,,}"
+              (cd "apps/$APP" && kamal rollback "$ARG")
+              curl -fsS "https://$APP.$BASE_DOMAIN/up"; echo ;;
+            sql-readonly)
+              printf '%s\n' "$ARG" | ssh "deploy@$APP_HOST" "docker exec -i lab-postgres psql -U ${db}_ro -d $db -v ON_ERROR_STOP=1 -P pager=off -f -" ;;
+            clickhouse-query)
+              [ -n "$OBS_HOST" ] || { echo "нет OBS_HOST"; exit 1; }
+              printf '%s' "$ARG" | ssh "deploy@$OBS_HOST" 'sudo /usr/local/bin/lab-ch-query' ;;
+            backup-now)
+              for h in "$APP_HOST" "$OBS_HOST"; do
+                [ -n "$h" ] || continue
+                ssh "deploy@$h" 'sudo systemctl start lab-backup.service && sudo journalctl -u lab-backup.service -n 15 --no-pager -o cat'
+              done ;;
+            set-sentry-dsn)
+              printf '%s\n' "$ARG" | ssh "deploy@$APP_HOST" "sudo tee /etc/lab/apps/$APP.sentry_dsn >/dev/null"
+              echo "DSN сохранён. Применится при следующем деплое $APP (или: ops provision app_env, затем ops restart $APP)." ;;
+            dns-check)
+              [ -n "$BASE_DOMAIN" ] || { echo "нет vars.BASE_DOMAIN"; exit 1; }
+              check() { got=$(dig +short "$1" A | tail -1); echo "$1 → ${got:-нет записи} (ждём ${2:-?}) $([ "$got" = "$2" ] && echo ✅ || echo ❌)"; }
+              for a in $(ls apps); do check "$a.$BASE_DOMAIN" "$APP_HOST"; done
+              if [ -n "$OBS_HOST" ]; then for s in grafana errors flags status ch home; do check "$s.$BASE_DOMAIN" "$OBS_HOST"; done; fi ;;
+            test-alert)
+              [ -n "$TG_TOKEN" ] || { echo "нет секретов TELEGRAM_*"; exit 1; }
+              curl -fsS "https://api.telegram.org/bot$TG_TOKEN/sendMessage" --data-urlencode "chat_id=$TG_CHAT" \
+                --data-urlencode "text=🔔 Пробная тревога лаборатории: уведомления работают." >/dev/null
+              echo "Отправлено в Telegram" ;;
+            send-panel-passwords)
+              [ -n "$TG_TOKEN" ] && [ -n "$OBS_HOST" ] || { echo "нужны TELEGRAM_* и OBS_HOST"; exit 1; }
+              vals=$(ssh "deploy@$OBS_HOST" 'sudo /usr/local/bin/lab-panel-passwords')
+              while read -r v; do echo "::add-mask::$v"; done <<< "$vals"
+              g=$(sed -n 1p <<< "$vals"); b=$(sed -n 2p <<< "$vals"); p=$(sed -n 3p <<< "$vals")
+              text=$(printf '🔑 Панели лаборатории\nGrafana: https://grafana.%s — admin / %s\nBugsink: https://errors.%s — admin / %s\nFlipt и home: https://flags.%s — owner / %s\nСохрани в менеджер паролей и удали это сообщение.' \
+                "$BASE_DOMAIN" "$g" "$BASE_DOMAIN" "$b" "$BASE_DOMAIN" "$p")
+              curl -fsS "https://api.telegram.org/bot$TG_TOKEN/sendMessage" --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$text" >/dev/null
+              echo "Отправлено в Telegram" ;;
+            redeploy)
+              gh workflow run pipeline.yml --repo "$GITHUB_REPOSITORY" --ref main -f all=true
+              echo "Запущен pipeline на всех приложениях: gh run list --workflow pipeline.yml" ;;
+            provision)
+              if [ "$ARG" = "bootstrap" ]; then
+                gh workflow run provision.yml --repo "$GITHUB_REPOSITORY" --ref main -f bootstrap=true
+              else
+                gh workflow run provision.yml --repo "$GITHUB_REPOSITORY" --ref main -f tags="$ARG"
+              fi
+              echo "Запущен provision ${ARG:-полностью}: gh run list --workflow provision.yml" ;;
+          esac
 
-      - name: clickhouse-query
-        if: inputs.action == 'clickhouse-query'
+      - name: Ответ в issue
+        if: always() && env.ISSUE != ''
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS: ${{ job.status }}
         run: |
-          [ -n "$OBS_HOST" ] || { echo "Нет OBS_HOST"; exit 1; }
-          printf '%s' "$ARG" | ssh "deploy@$OBS_HOST" 'sudo /usr/local/bin/lab-ch-query' | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: backup-now
-        if: inputs.action == 'backup-now'
-        run: |
-          for h in "$APP_HOST" "$OBS_HOST"; do
-            [ -n "$h" ] || continue
-            ssh "deploy@$h" 'sudo systemctl start lab-backup.service && sudo journalctl -u lab-backup.service -n 20 --no-pager'
-          done
-
-      - name: set-sentry-dsn
-        if: inputs.action == 'set-sentry-dsn'
-        run: |
-          printf '%s\n' "$ARG" | ssh "deploy@$APP_HOST" "sudo tee /etc/lab/apps/$APP.sentry_dsn >/dev/null"
-          echo "DSN сохранён. Применится при следующем деплое или: gh workflow run provision.yml -f tags=app_env, затем ops restart." | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: dns-check
-        if: inputs.action == 'dns-check'
-        run: |
-          [ -n "$BASE_DOMAIN" ] || { echo "Нет vars.BASE_DOMAIN"; exit 1; }
-          check() { got=$(dig +short "$1" A | tail -1); echo "$1 → ${got:-нет записи} (ждём $2) $([ "$got" = "$2" ] && echo ✅ || echo ❌)"; }
+          icon=$([ "$STATUS" = success ] && echo "✅" || echo "❌")
           {
-            for a in $(ls apps); do check "$a.$BASE_DOMAIN" "$APP_HOST"; done
-            [ -n "$OBS_HOST" ] && for s in grafana errors flags status ch home; do check "$s.$BASE_DOMAIN" "$OBS_HOST"; done
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+            printf '%s `%s%s` — %s · [запуск](%s)\n\n```\n' "$icon" "$ACTION" "${APP:+ $APP}" "$STATUS" "$RUN_URL"
+            tail -c 60000 "$OUT" 2>/dev/null | sed 's/```/ʼʼʼ/g'
+            printf '\n```\n'
+          } > /tmp/reply.md
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" -F body=@/tmp/reply.md >/dev/null
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$ISSUE" -f state=closed >/dev/null
 
-      - name: test-alert
-        if: inputs.action == 'test-alert'
+      - name: Сводка
+        if: always()
         run: |
-          [ -n "$TG_TOKEN" ] || { echo "Нет секретов TELEGRAM_*"; exit 1; }
-          curl -fsS "https://api.telegram.org/bot$TG_TOKEN/sendMessage" --data-urlencode "chat_id=$TG_CHAT" \
-            --data-urlencode "text=🔔 Пробная тревога лаборатории: уведомления работают." >/dev/null
-          echo "Отправлено" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: send-panel-passwords
-        if: inputs.action == 'send-panel-passwords'
-        run: |
-          [ -n "$TG_TOKEN" ] && [ -n "$OBS_HOST" ] || { echo "Нужны TELEGRAM_* и OBS_HOST"; exit 1; }
-          vals=$(ssh "deploy@$OBS_HOST" 'sudo /usr/local/bin/lab-panel-passwords')
-          while read -r v; do echo "::add-mask::$v"; done <<< "$vals"
-          g=$(sed -n 1p <<< "$vals"); b=$(sed -n 2p <<< "$vals"); p=$(sed -n 3p <<< "$vals")
-          text="🔑 Панели лаборатории
-          Grafana: https://grafana.$BASE_DOMAIN — admin / $g
-          Bugsink: https://errors.$BASE_DOMAIN — admin / $b
-          Flipt и home: https://flags.$BASE_DOMAIN — owner / $p
-          Сохрани в менеджер паролей и удали это сообщение."
-          curl -fsS "https://api.telegram.org/bot$TG_TOKEN/sendMessage" --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$text" >/dev/null
-          echo "Отправлено в Telegram" | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo "### ops: $ACTION ${APP}"; echo '```'; tail -c 60000 "$OUT" 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

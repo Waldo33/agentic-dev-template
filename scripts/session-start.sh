@@ -23,7 +23,8 @@ if command -v gh >/dev/null 2>&1; then
   runs=$(gh run list --branch main -L 3 --json workflowName,conclusion,status,displayTitle \
     --jq '.[] | "  \(.workflowName): \(.conclusion // .status) — \(.displayTitle)"' 2>/dev/null)
   [ -n "$runs" ] && { echo "Пайплайн main:"; echo "$runs"; echo; }
-  incidents=$(gh issue list --label incident --state open --json number,title --jq '.[] | "  #\(.number) \(.title)"' 2>/dev/null)
+  # gh issue list ходит в GraphQL, а он из облачной сессии закрыт — только REST (gh api)
+  incidents=$(gh api 'repos/{owner}/{repo}/issues?labels=incident&state=open' --jq '.[] | "  #\(.number) \(.title)"' 2>/dev/null)
   [ -n "$incidents" ] && { echo "Открытые инциденты:"; echo "$incidents"; echo; }
 fi
 if [ -f docs/roadmap.md ]; then

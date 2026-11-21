@@ -27,7 +27,7 @@ pnpm new-app <имя>               # новая идея из шаблона
 pnpm --filter <имя> dev          # локально, http://localhost:3000
 BASE_URL=http://localhost:3000 pnpm --filter <имя> e2e
 gh run watch                     # следить за пайплайном после push
-gh workflow run ops.yml -f action=logs -f app=<имя>   # операции на проде (список — docs/runbooks/ops.md)
+scripts/ops.sh logs <имя>        # операции на проде через issue (список — docs/runbooks/ops.md)
 ```
 
 ## Правила, которые нельзя нарушать
@@ -60,7 +60,7 @@ gh workflow run ops.yml -f action=logs -f app=<имя>   # операции на
 
 ## Где смотреть прод
 
-Нет SSH из среды агента — всё через Actions: `gh run view --log-failed`, сводки запусков, `gh workflow run ops.yml` (логи, SQL только чтение, ClickHouse, откат, бэкап). Если владелец открыл домен в сетевых настройках среды — можно и напрямую: `https://<имя>.<домен>/up`, Grafana, Bugsink, Flipt. Скилл `ops`.
+Нет SSH из среды агента, и запускать workflow вручную из сессии нельзя. Поэтому: `gh run view --log-failed` и сводки запусков — по пайплайну; `scripts/ops.sh <действие>` — операции на проде (создаёт issue «ops: …», `ops.yml` выполняет и отвечает комментарием): логи, SQL только чтение, ClickHouse, откат, бэкап, повторный деплой, provision. Если владелец открыл домен в сетевых настройках среды — можно и напрямую: `https://<имя>.<домен>/up`, Grafana, Bugsink, Flipt. Скилл `ops`.
 
 ## Скиллы и агенты
 
