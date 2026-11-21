@@ -99,11 +99,14 @@ end
 
 step "Grafana: провижининг дашборда, источника и тревог"
 GF_IMAGE=$(awk '/image: grafana/{print $2}' compose/obs/compose.yml)
+GF_PROV="$OUT/grafana-provisioning"
+cp -r obs/grafana/provisioning "$GF_PROV"
+cp "$OUT/grafana-telegram.yml" "$GF_PROV/alerting/telegram.yml"   # как делает Ansible
 docker rm -f lab-gf-test >/dev/null 2>&1 || true
 docker run -d --name lab-gf-test -p 13000:3000 \
   -e GF_SECURITY_ADMIN_PASSWORD=validate -e GF_PLUGINS_PREINSTALL=grafana-clickhouse-datasource \
-  -e CH_READER_PASSWORD=x -e TELEGRAM_BOT_TOKEN=123:x -e TELEGRAM_CHAT_ID=1 \
-  -v "$PWD/obs/grafana/provisioning:/etc/grafana/provisioning:ro" \
+  -e CH_READER_PASSWORD=x \
+  -v "$GF_PROV:/etc/grafana/provisioning:ro" \
   -v "$PWD/obs/grafana/dashboards:/var/lib/grafana-dashboards:ro" "$GF_IMAGE" >/dev/null
 ok=0
 for _ in $(seq 90); do curl -fs http://localhost:13000/api/health >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done

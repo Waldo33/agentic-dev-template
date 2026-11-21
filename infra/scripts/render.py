@@ -38,6 +38,7 @@ templates = {
     "obs/gatus.yaml.j2": "gatus.yaml",
     "obs/flipt.yml.j2": "flipt.yml",
     "obs/home.html.j2": "index.html",
+    "obs/grafana-telegram.yml.j2": "grafana-telegram.yml",
 }
 for src, dst in templates.items():
     text = env.from_string((root / src).read_text()).render(**ctx)

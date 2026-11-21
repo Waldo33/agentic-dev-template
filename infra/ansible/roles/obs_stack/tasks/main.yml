@@ -42,7 +42,16 @@
     path: /opt/lab/obs/clickhouse/init/00-users.sh
     mode: "0755"
 
-- name: Без Telegram — без контакт-точки Grafana (иначе пустой токен ломает провижининг)
+- name: Контакт-точка Telegram для Grafana
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../obs/grafana-telegram.yml.j2"
+    dest: /opt/lab/obs/grafana/provisioning/alerting/telegram.yml
+    mode: "0644"
+  when: telegram_bot_token | length > 0
+  register: gf_telegram
+  no_log: true
+
+- name: Без Telegram — без контакт-точки (пустой токен ломает провижининг)
   ansible.builtin.file:
     path: /opt/lab/obs/grafana/provisioning/alerting/telegram.yml
     state: absent
@@ -91,7 +100,7 @@
     - { svc: caddy, when: "{{ rendered.results[0].changed }}" }
     - { svc: gatus, when: "{{ rendered.results[1].changed }}" }
     - { svc: flipt, when: "{{ rendered.results[2].changed }}" }
-    - { svc: grafana, when: "{{ static_files.results[2].changed }}" }
+    - { svc: grafana, when: "{{ static_files.results[2].changed or (gf_telegram.changed | default(false)) }}" }
   when: item.when | bool
   changed_when: true
 

@@ -49,8 +49,6 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_PLUGINS_PREINSTALL: grafana-clickhouse-datasource
       CH_READER_PASSWORD: ${CH_READER_PASSWORD}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
     volumes:
       - /var/lib/lab/obs/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
