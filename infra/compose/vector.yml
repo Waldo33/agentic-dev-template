@@ -1,0 +1,17 @@
+# Vector: сборщик логов и метрик хоста. Конфиг рендерит Ansible в /opt/lab/vector/vector.yaml.
+name: lab-vector
+services:
+  vector:
+    image: timberio/vector:0.51.1-alpine
+    container_name: lab-vector
+    restart: unless-stopped
+    command: ["--config", "/etc/vector/vector.yaml"]
+    environment:
+      PROCFS_ROOT: /host/proc
+      SYSFS_ROOT: /host/sys
+    volumes:
+      - /opt/lab/vector/vector.yaml:/etc/vector/vector.yaml:ro
+      - /var/lib/lab/vector:/var/lib/vector
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro

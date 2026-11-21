@@ -1,0 +1,53 @@
+# Внутренние секреты наблюдаемости генерируются на obs один раз и не покидают серверы
+# (приложения на app получают нужные им через env-файлы). В логи Actions не выводятся.
+- name: Сгенерировать недостающие секреты obs
+  ansible.builtin.shell: |
+    set -e
+    umask 077
+    mkdir -p /etc/lab/obs
+    f=/etc/lab/obs/secrets.env
+    touch "$f"
+    changed=0
+    for k in CH_ADMIN_PASSWORD CH_WRITER_PASSWORD CH_READER_PASSWORD GRAFANA_ADMIN_PASSWORD \
+             BUGSINK_SECRET_KEY BUGSINK_ADMIN_PASSWORD PANEL_PASSWORD FLAGS_APP_PASSWORD GATUS_PUSH_TOKEN; do
+      grep -q "^$k=" "$f" || { echo "$k=$(openssl rand -hex 24)" >> "$f"; changed=1; }
+    done
+    echo "changed=$changed"
+  args:
+    executable: /bin/bash
+  register: gen
+  changed_when: "'changed=1' in gen.stdout"
+  no_log: true
+
+- name: bcrypt-хэши паролей для basic auth в Caddy
+  ansible.builtin.shell: |
+    set -e
+    umask 077
+    . /etc/lab/obs/secrets.env
+    f=/etc/lab/obs/hashes.env
+    touch "$f"
+    changed=0
+    for pair in PANEL_HASH:PANEL_PASSWORD FLAGS_APP_HASH:FLAGS_APP_PASSWORD; do
+      k=${pair%%:*}; v=${pair##*:}
+      grep -q "^$k=" "$f" || { echo "$k=$(docker run --rm caddy:2.10-alpine caddy hash-password --plaintext "${!v}")" >> "$f"; changed=1; }
+    done
+    echo "changed=$changed"
+  args:
+    executable: /bin/bash
+  register: hashes
+  changed_when: "'changed=1' in hashes.stdout"
+  no_log: true
+
+- name: Прочитать секреты obs
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: [/etc/lab/obs/secrets.env, /etc/lab/obs/hashes.env]
+  register: obs_files
+  no_log: true
+
+- name: Секреты obs как переменные (для ролей obs_stack, vector и app_env на сервере app)
+  ansible.builtin.set_fact:
+    obs_secrets: "{{ dict(_lines | map('regex_replace', '^([^=]+)=.*$', '\\1') | zip(_lines | map('regex_replace', '^[^=]+=(.*)$', '\\1'))) }}"
+  vars:
+    _lines: "{{ obs_files.results | map(attribute='content') | map('b64decode') | join('\n') | split('\n') | select('match', '^[A-Z_]+=') | list }}"
+  no_log: true

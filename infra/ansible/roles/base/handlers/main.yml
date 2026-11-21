@@ -1,0 +1,18 @@
+- name: Перезапустить ssh
+  ansible.builtin.service:
+    name: ssh
+    state: reloaded
+
+- name: Перезапустить fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    state: restarted
+
+- name: Перезапустить journald
+  ansible.builtin.service:
+    name: systemd-journald
+    state: restarted
+
+- name: Применить sysctl
+  ansible.builtin.command: sysctl --system
+  changed_when: true

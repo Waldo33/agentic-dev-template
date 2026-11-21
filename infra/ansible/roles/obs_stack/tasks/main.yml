@@ -1,0 +1,105 @@
+# Стек наблюдаемости на obs: рендер конфигов с секретами, docker compose up, схема ClickHouse.
+- name: Папки obs
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    mode: "{{ item.mode | default('0750') }}"
+  loop:
+    - { path: /opt/lab/obs }
+    - { path: /opt/lab/obs/home, mode: "0755" }
+    - { path: /opt/lab/obs/gatus }
+    - { path: /opt/lab/obs/flipt }
+    - { path: /var/lib/lab/obs }
+    - { path: /var/lib/lab/obs/caddy }
+    - { path: /var/lib/lab/obs/clickhouse, owner: "101" }
+    - { path: /var/lib/lab/obs/grafana, owner: "472" }
+    - { path: /var/lib/lab/obs/bugsink }
+    - { path: /var/lib/lab/obs/gatus }
+    - { path: /var/lib/lab/obs/flipt }
+
+- name: Статичные файлы (compose, ClickHouse, Grafana)
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "0644"
+    directory_mode: "0755"
+  loop:
+    - { src: "{{ playbook_dir }}/../compose/obs/compose.yml", dest: /opt/lab/obs/compose.yml }
+    - { src: "{{ playbook_dir }}/../clickhouse/", dest: /opt/lab/obs/clickhouse/ }
+    - { src: "{{ playbook_dir }}/../obs/grafana/", dest: /opt/lab/obs/grafana/ }
+  register: static_files
+
+- name: Помощники для ops.yml
+  ansible.builtin.copy:
+    src: "{{ item }}.sh"
+    dest: "/usr/local/bin/{{ item }}"
+    mode: "0750"
+  loop: [lab-ch-query, lab-panel-passwords]
+
+- name: Скрипт пользователей ClickHouse исполняемый
+  ansible.builtin.file:
+    path: /opt/lab/obs/clickhouse/init/00-users.sh
+    mode: "0755"
+
+- name: Без Telegram — без контакт-точки Grafana (иначе пустой токен ломает провижининг)
+  ansible.builtin.file:
+    path: /opt/lab/obs/grafana/provisioning/alerting/telegram.yml
+    state: absent
+  when: telegram_bot_token | length == 0
+
+- name: Конфиги с секретами
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../obs/{{ item.src }}"
+    dest: "/opt/lab/obs/{{ item.dest }}"
+    mode: "{{ item.mode | default('0600') }}"
+  loop:
+    - { src: Caddyfile.j2, dest: Caddyfile, mode: "0644" }
+    - { src: gatus.yaml.j2, dest: gatus/config.yaml, mode: "0644" }
+    - { src: flipt.yml.j2, dest: flipt/config.yml, mode: "0644" }
+    - { src: home.html.j2, dest: home/index.html, mode: "0644" }
+  vars:
+    obs: "{{ obs_secrets }}"
+  register: rendered
+  no_log: true
+
+- name: env для compose (секреты + домен + Telegram)
+  ansible.builtin.shell: |
+    set -e
+    umask 077
+    {
+      cat /etc/lab/obs/secrets.env
+      echo "BASE_DOMAIN={{ base_domain }}"
+      echo "TELEGRAM_BOT_TOKEN={{ telegram_bot_token }}"
+      echo "TELEGRAM_CHAT_ID={{ telegram_chat_id }}"
+    } > /opt/lab/obs/.env.new
+    if cmp -s /opt/lab/obs/.env.new /opt/lab/obs/.env; then rm /opt/lab/obs/.env.new; echo same; else mv /opt/lab/obs/.env.new /opt/lab/obs/.env; echo changed; fi
+  args:
+    executable: /bin/bash
+  register: obs_env
+  changed_when: "'changed' in obs_env.stdout"
+  no_log: true
+
+- name: Поднять стек
+  ansible.builtin.command: docker compose --project-directory /opt/lab/obs up -d --wait --wait-timeout 180
+  register: obs_up
+  changed_when: "'Started' in obs_up.stderr or 'Recreated' in obs_up.stderr or 'Created' in obs_up.stderr"
+
+- name: Перечитать конфиги, если поменялись
+  ansible.builtin.command: docker compose --project-directory /opt/lab/obs restart {{ item.svc }}
+  loop:
+    - { svc: caddy, when: "{{ rendered.results[0].changed }}" }
+    - { svc: gatus, when: "{{ rendered.results[1].changed }}" }
+    - { svc: flipt, when: "{{ rendered.results[2].changed }}" }
+    - { svc: grafana, when: "{{ static_files.results[2].changed }}" }
+  when: item.when | bool
+  changed_when: true
+
+- name: Пользователи и таблицы ClickHouse (идемпотентно)
+  ansible.builtin.shell: |
+    set -e
+    docker exec lab-clickhouse bash /docker-entrypoint-initdb.d/00-users.sh
+    docker exec -i lab-clickhouse sh -c 'clickhouse-client --user admin --password "$CLICKHOUSE_PASSWORD" --multiquery' < /opt/lab/obs/clickhouse/init/01-tables.sql
+  args:
+    executable: /bin/bash
+  changed_when: false

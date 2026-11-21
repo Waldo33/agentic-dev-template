@@ -1,0 +1,32 @@
+# Полная подготовка серверов. Повторный прогон безопасен; приёмка — второй прогон даёт changed=0.
+#   ansible-playbook site.yml                  # всё
+#   ansible-playbook site.yml --tags app_env   # только базы и env-файлы приложений (шаг пайплайна перед деплоем)
+- name: Сервер наблюдаемости
+  hosts: obs
+  gather_facts: false
+  roles:
+    - { role: base, tags: [base] }
+    - { role: docker, tags: [docker] }
+    - { role: obs_secrets, tags: [obs, app_env, vector] }
+    - { role: obs_stack, tags: [obs] }
+    - { role: vector, tags: [vector] }
+    - { role: backup, tags: [backup] }
+  pre_tasks:
+    - name: Пропустить obs, если OBS_HOST не задан
+      ansible.builtin.meta: end_play
+      when: obs_host_ip | length == 0
+      tags: [always]
+    - name: Собрать факты
+      ansible.builtin.setup:
+      tags: [always]
+
+- name: Сервер приложений
+  hosts: app
+  gather_facts: true
+  roles:
+    - { role: base, tags: [base] }
+    - { role: docker, tags: [docker] }
+    - { role: postgres, tags: [postgres] }
+    - { role: app_env, tags: [app_env] }
+    - { role: vector, tags: [vector] }
+    - { role: backup, tags: [backup] }

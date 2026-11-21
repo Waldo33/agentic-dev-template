@@ -1,0 +1,92 @@
+# Подготовка серверов Ansible'ом: вручную (`gh workflow run provision.yml [-f bootstrap=true]`)
+# и автоматически при изменении infra/ в main. Сначала --check --diff в лог, потом применение.
+name: provision
+
+on:
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: Первый прогон на чистых серверах (вход под root)
+        type: boolean
+        default: false
+      tags:
+        description: Только эти теги Ansible (через запятую), пусто — всё
+        type: string
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "infra/ansible/**"
+      - "infra/compose/**"
+      - "infra/obs/**"
+      - "infra/vector/**"
+      - "infra/clickhouse/**"
+
+concurrency:
+  group: provision
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      APP_HOST: ${{ vars.APP_HOST }}
+      OBS_HOST: ${{ vars.OBS_HOST }}
+      BASE_DOMAIN: ${{ vars.BASE_DOMAIN }}
+      ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+      S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+      RESTIC_PASSWORD: ${{ secrets.RESTIC_PASSWORD }}
+      FLIPT_GIT_REMOTE: ${{ vars.FLIPT_GIT_REMOTE }}
+      FLIPT_GIT_TOKEN: ${{ secrets.FLIPT_GIT_TOKEN }}
+      ANSIBLE_SSH_USER: ${{ inputs.bootstrap && 'root' || 'deploy' }}
+      ANSIBLE_FORCE_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Есть ли куда разворачивать
+        id: gate
+        run: |
+          if [ -z "$APP_HOST" ] || [ -z "$BASE_DOMAIN" ]; then
+            echo "Нет vars APP_HOST / BASE_DOMAIN — пропускаю (скилл bootstrap)." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.go == 'true'
+        run: pip install --quiet ansible-core
+      - if: steps.gate.outputs.go == 'true'
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Ключи хостов и список приложений
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          for h in "$APP_HOST" "$OBS_HOST"; do [ -n "$h" ] && ssh-keyscan -H "$h" >> ~/.ssh/known_hosts 2>/dev/null; done
+          echo "DEPLOY_PUBLIC_KEY=$(ssh-add -L | head -1)" >> "$GITHUB_ENV"
+          echo "LAB_APPS=$(node scripts/apps-matrix.mjs --all)" >> "$GITHUB_ENV"
+      - name: Что изменится (--check --diff)
+        if: steps.gate.outputs.go == 'true' && !inputs.bootstrap
+        working-directory: infra/ansible
+        continue-on-error: true
+        run: ansible-playbook site.yml --check --diff ${{ inputs.tags && format('--tags {0}', inputs.tags) || '' }}
+      - name: Применить
+        if: steps.gate.outputs.go == 'true'
+        working-directory: infra/ansible
+        run: |
+          set -o pipefail
+          ansible-playbook site.yml ${{ inputs.tags && format('--tags {0}', inputs.tags) || '' }} | tee /tmp/ansible.log
+          {
+            echo "### Итог Ansible"
+            echo '```'
+            sed -n '/PLAY RECAP/,$p' /tmp/ansible.log | sed 's/\x1b\[[0-9;]*m//g'
+            echo '```'
+            echo "Приёмка: второй прогон подряд должен дать changed=0."
+          } >> "$GITHUB_STEP_SUMMARY"

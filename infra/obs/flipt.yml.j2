@@ -1,0 +1,43 @@
+# Flipt v2: флаги хранятся в git-репозитории (FLIPT_GIT_REMOTE), изменения из панели — коммитами.
+# Авторизацию делает Caddy (basic auth), сам Flipt слушает только внутреннюю сеть.
+log:
+  level: warn
+
+server:
+  http_port: 8080
+
+{% if flipt_git_remote %}
+credentials:
+  github:
+    type: access_token
+    access_token: "{{ flipt_git_token }}"
+
+storage:
+  flags:
+    remote: "{{ flipt_git_remote }}"
+    branch: main
+    poll_interval: 30s
+    fetch_policy: lenient
+    credentials: github
+    backend:
+      type: local
+      path: /var/opt/flipt/repo
+
+environments:
+  production:
+    name: production
+    default: true
+    storage: flags
+{% else %}
+storage:
+  flags:
+    backend:
+      type: local
+      path: /var/opt/flipt/repo
+
+environments:
+  production:
+    name: production
+    default: true
+    storage: flags
+{% endif %}

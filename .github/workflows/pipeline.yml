@@ -1,0 +1,306 @@
+# Единый конвейер: проверки → образ → e2e против контейнера → деплой (Kamal) → проверка прода → откат → Telegram.
+# Деплой включается сам, когда заданы vars APP_HOST и BASE_DOMAIN и секрет SSH_PRIVATE_KEY (скилл bootstrap).
+name: pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      all:
+        description: Собрать и выкатить все приложения
+        type: boolean
+        default: false
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 22
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.apps.outputs.apps }}
+      deploy: ${{ steps.deploy.outputs.deploy }}
+      infra: ${{ steps.infra.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: apps
+        name: Затронутые приложения
+        run: |
+          base="${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
+          if [ "${{ inputs.all }}" = "true" ]; then apps=$(node scripts/apps-matrix.mjs --all); else apps=$(node scripts/apps-matrix.mjs "$base"); fi
+          echo "apps=$apps" >> "$GITHUB_OUTPUT"
+          echo "Приложения: $apps" >> "$GITHUB_STEP_SUMMARY"
+      - id: infra
+        name: Затронута инфраструктура
+        run: |
+          base="${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base" 2>/dev/null || git diff --name-only "$base" HEAD | grep -qE '^(infra/|\.github/workflows/pipeline\.yml)'; then
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "infra=false" >> "$GITHUB_OUTPUT"
+          fi
+      - id: deploy
+        name: Деплой включён?
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ] && [ "${{ github.event_name }}" != "pull_request" ] \
+             && [ -n "${{ vars.APP_HOST }}" ] && [ -n "${{ vars.BASE_DOMAIN }}" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "Деплой выключен: нет vars APP_HOST / BASE_DOMAIN или это не main (см. скилл bootstrap)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Контракт приложений и миграции
+        run: node scripts/check-contract.mjs
+        env:
+          CONTRACT_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      - name: Шаблон собирается в рабочее приложение
+        run: |
+          node scripts/new-app.mjs tpl-check
+          pnpm install --no-frozen-lockfile >/dev/null
+          pnpm --filter tpl-check typecheck && pnpm --filter tpl-check test
+          rm -rf apps/tpl-check
+      - name: Секреты не утекли в код
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  infra:
+    needs: plan
+    if: needs.plan.outputs.infra == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install --quiet ansible-core jinja2
+      - name: Проверка инфраструктуры (Ansible, шаблоны, compose, Vector, Caddy, ClickHouse, Postgres, Grafana)
+        run: infra/scripts/validate.sh
+
+  build:
+    needs: [plan, check]
+    if: needs.plan.outputs.apps != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.plan.outputs.apps) }}
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/lab-${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Имя образа в нижнем регистре
+        run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - name: Образ
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/${{ matrix.app }}/Dockerfile
+          build-args: APP_RELEASE=${{ github.sha }}
+          platforms: linux/${{ vars.IMAGE_ARCH || 'amd64' }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          load: true
+          cache-from: type=gha,scope=${{ matrix.app }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.app }}
+      - name: Запустить контейнер
+        run: |
+          docker run -d --name app --network host \
+            -e DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres -e PORT=3000 \
+            "$IMAGE:${{ github.sha }}"
+          for i in $(seq 60); do curl -fs localhost:3000/up && exit 0; sleep 1; done
+          docker logs app; exit 1
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter "${{ matrix.app }}..."
+      - run: pnpm --filter ${{ matrix.app }} exec playwright install --with-deps chromium
+      - name: e2e против контейнера
+        run: pnpm --filter ${{ matrix.app }} e2e
+        env:
+          BASE_URL: http://localhost:3000
+          EXPECT_RELEASE: ${{ github.sha }}
+      - name: Логи контейнера
+        if: failure()
+        run: docker logs app | tail -200
+      - name: Скриншоты и трейсы e2e
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.app }}
+          path: |
+            apps/${{ matrix.app }}/test-results
+            apps/${{ matrix.app }}/playwright-report
+          retention-days: 14
+          if-no-files-found: ignore
+      - name: Опубликовать образ
+        if: needs.plan.outputs.deploy == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${{ github.sha }}"
+
+  prepare:
+    needs: [plan, build]
+    if: needs.plan.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install --quiet ansible-core
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Базы и env-файлы приложений, проверки Gatus (Ansible, теги app_env и obs)
+        working-directory: infra/ansible
+        run: |
+          for h in "${{ vars.APP_HOST }}" "${{ vars.OBS_HOST }}"; do [ -n "$h" ] && ssh-keyscan -H "$h" >> ~/.ssh/known_hosts 2>/dev/null; done
+          export LAB_APPS=$(node ../../scripts/apps-matrix.mjs --all)
+          ansible-playbook site.yml --tags app_env,obs
+        env:
+          APP_HOST: ${{ vars.APP_HOST }}
+          OBS_HOST: ${{ vars.OBS_HOST }}
+          BASE_DOMAIN: ${{ vars.BASE_DOMAIN }}
+          ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FLIPT_GIT_REMOTE: ${{ vars.FLIPT_GIT_REMOTE }}
+          FLIPT_GIT_TOKEN: ${{ secrets.FLIPT_GIT_TOKEN }}
+
+  deploy:
+    needs: [plan, build, prepare]
+    if: needs.plan.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+      issues: write
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        app: ${{ fromJSON(needs.plan.outputs.apps) }}
+    concurrency:
+      group: deploy-${{ matrix.app }}
+      cancel-in-progress: false
+    env:
+      APP: ${{ matrix.app }}
+      APP_HOST: ${{ vars.APP_HOST }}
+      BASE_DOMAIN: ${{ vars.BASE_DOMAIN }}
+      IMAGE_ARCH: ${{ vars.IMAGE_ARCH || 'amd64' }}
+      REGISTRY_USER: ${{ github.actor }}
+      KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      URL: https://${{ matrix.app }}.${{ vars.BASE_DOMAIN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Пространство имён образов
+        run: echo "IMAGE_NAMESPACE=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - run: gem install kamal -v "~> 2.12" --no-document
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - run: ssh-keyscan -H "$APP_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+      - name: Текущая версия (для отката)
+        id: prev
+        run: |
+          prev=$(curl -fs "$URL/up" | jq -r '.release // empty' || true)
+          echo "version=$prev" >> "$GITHUB_OUTPUT"
+          echo "Было: ${prev:-нет}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Выкатить
+        id: deploy
+        working-directory: apps/${{ matrix.app }}
+        run: kamal deploy --skip-push --version="${{ github.sha }}"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Проверка прода
+        id: verify
+        run: |
+          for i in $(seq 30); do
+            rel=$(curl -fs "$URL/up" | jq -r '.release // empty' || true)
+            [ "$rel" = "${{ github.sha }}" ] && break; sleep 2
+          done
+          [ "$rel" = "${{ github.sha }}" ] || { echo "/up отдаёт '$rel', ждали ${{ github.sha }}"; exit 1; }
+          pnpm install --frozen-lockfile --filter "$APP..."
+          pnpm --filter "$APP" exec playwright install --with-deps chromium
+          BASE_URL="$URL" EXPECT_RELEASE="${{ github.sha }}" SMOKE_READONLY=1 pnpm --filter "$APP" e2e --project=phone
+          sleep 60
+          curl -fs "$URL/up" | jq -e '.ok == true' >/dev/null
+          echo "Выкачено и проверено: $URL" >> "$GITHUB_STEP_SUMMARY"
+      - name: Откат
+        id: rollback
+        # Kamal сам не переключает трафик, если /up нового контейнера не ответил; откат нужен, когда упала проверка прода
+        if: failure() && steps.verify.outcome == 'failure' && steps.prev.outputs.version != ''
+        working-directory: apps/${{ matrix.app }}
+        run: |
+          kamal rollback "${{ steps.prev.outputs.version }}"
+          echo "Откатили на ${{ steps.prev.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Инцидент
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create incident --color B60205 --description "Прод сломан или откачен" 2>/dev/null || true
+          gh issue create --label incident \
+            --title "Деплой $APP ${GITHUB_SHA::7} не прошёл проверку" \
+            --body "Пайплайн: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Откат: ${{ steps.rollback.outcome == 'success' && format('на {0}', steps.prev.outputs.version) || 'не выполнялся' }}
+          Дальше — скилл incident." || true
+      - name: Telegram
+        if: always()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] || exit 0
+          case "${{ job.status }}" in
+            success) icon="✅ выкатили" ;;
+            *) icon="🔴 не выкатили${{ steps.rollback.outcome == 'success' && ', откатили' || '' }}" ;;
+          esac
+          msg=$(git log -1 --format=%s)
+          text="$icon $APP — $msg
+          $URL
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -fsS "https://api.telegram.org/bot$TOKEN/sendMessage" --data-urlencode "chat_id=$CHAT" --data-urlencode "text=$text" >/dev/null || true

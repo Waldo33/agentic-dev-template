@@ -1,0 +1,33 @@
+# Один Postgres на сервере приложений, в сети kamal, наружу не открыт.
+# Пароль суперпользователя генерируется на сервере и никуда не уходит.
+- name: Секрет Postgres
+  ansible.builtin.shell: |
+    set -e
+    f=/etc/lab/postgres.env
+    [ -f "$f" ] && { echo exists; exit 0; }
+    umask 077
+    echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" > "$f"
+    echo created
+  args:
+    executable: /bin/bash
+  register: pg_secret
+  changed_when: "'created' in pg_secret.stdout"
+
+- name: Папки Postgres
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop: [/opt/lab/postgres, /var/lib/lab/postgres]
+
+- name: compose Postgres
+  ansible.builtin.copy:
+    dest: /opt/lab/postgres/compose.yml
+    src: "{{ playbook_dir }}/../compose/app/postgres.yml"
+    mode: "0644"
+  register: pg_compose
+
+- name: Поднять Postgres
+  ansible.builtin.command: docker compose -f /opt/lab/postgres/compose.yml --env-file /etc/lab/postgres.env up -d --wait
+  register: pg_up
+  changed_when: "'Started' in pg_up.stderr or 'Recreated' in pg_up.stderr or 'Created' in pg_up.stderr"

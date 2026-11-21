@@ -1,0 +1,171 @@
+# Операции на проде для агента и владельца: только действия из списка, без произвольных команд.
+#   gh workflow run ops.yml -f action=logs -f app=hello -f arg=300
+# Результат — в логе и сводке запуска. Пароли и секреты в лог не попадают.
+name: ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Действие
+        type: choice
+        options:
+          - status
+          - logs
+          - restart
+          - rollback
+          - sql-readonly
+          - clickhouse-query
+          - backup-now
+          - set-sentry-dsn
+          - dns-check
+          - test-alert
+          - send-panel-passwords
+      app:
+        description: Приложение (для logs, restart, rollback, sql-readonly, set-sentry-dsn)
+        type: string
+        default: ""
+      arg:
+        description: Аргумент (число строк, sha версии, SQL, DSN)
+        type: string
+        default: ""
+
+concurrency:
+  group: ops-${{ inputs.action }}-${{ inputs.app }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  ops:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      ACTION: ${{ inputs.action }}
+      APP: ${{ inputs.app }}
+      ARG: ${{ inputs.arg }}
+      APP_HOST: ${{ vars.APP_HOST }}
+      OBS_HOST: ${{ vars.OBS_HOST }}
+      BASE_DOMAIN: ${{ vars.BASE_DOMAIN }}
+      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Проверка ввода
+        run: |
+          case "$ACTION" in logs|restart|rollback|sql-readonly|set-sentry-dsn)
+            [[ "$APP" =~ ^[a-z][a-z0-9-]{1,29}$ ]] && [ -d "apps/$APP" ] || { echo "нужно имя приложения из apps/"; exit 1; } ;;
+          esac
+          case "$ACTION" in
+            logs) [[ -z "$ARG" || "$ARG" =~ ^[0-9]{1,5}$ ]] || { echo "arg — число строк"; exit 1; } ;;
+            rollback) [[ "$ARG" =~ ^[0-9a-f]{7,40}$ ]] || { echo "arg — sha версии"; exit 1; } ;;
+            sql-readonly|clickhouse-query) [ -n "$ARG" ] || { echo "arg — SQL"; exit 1; } ;;
+            set-sentry-dsn) [[ "$ARG" =~ ^https://[a-zA-Z0-9]+@[a-zA-Z0-9.-]+/[0-9]+$ ]] || { echo "arg — DSN вида https://ключ@errors.<домен>/N"; exit 1; } ;;
+          esac
+          [ -n "$APP_HOST" ] || [ "$ACTION" = "dns-check" ] || [ "$ACTION" = "test-alert" ] || { echo "Нет vars.APP_HOST (скилл bootstrap)"; exit 1; }
+      - uses: webfactory/ssh-agent@v0.9.0
+        if: inputs.action != 'dns-check' && inputs.action != 'test-alert'
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Ключи хостов
+        if: inputs.action != 'dns-check' && inputs.action != 'test-alert'
+        run: for h in "$APP_HOST" "$OBS_HOST"; do [ -n "$h" ] && ssh-keyscan -H "$h" >> ~/.ssh/known_hosts 2>/dev/null; done; true
+
+      - name: status
+        if: inputs.action == 'status'
+        run: |
+          for h in "$APP_HOST" "$OBS_HOST"; do
+            [ -n "$h" ] || continue
+            echo "=== $h"
+            ssh "deploy@$h" 'uptime; echo; df -h / | tail -1; free -m | sed -n 2p; echo; docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"; echo; systemctl list-timers lab-backup.timer --no-pager 2>/dev/null | head -3'
+          done | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: logs
+        if: inputs.action == 'logs'
+        run: |
+          n="${ARG:-200}"
+          ssh "deploy@$APP_HOST" "c=\$(docker ps -q --filter label=service=lab-$APP --filter status=running | head -1); [ -n \"\$c\" ] && docker logs --tail $n --timestamps \$c 2>&1 || echo 'контейнер не запущен'"
+
+      - name: restart
+        if: inputs.action == 'restart'
+        run: |
+          ssh "deploy@$APP_HOST" "c=\$(docker ps -q --filter label=service=lab-$APP --filter status=running | head -1); docker restart \$c"
+          sleep 10; curl -fsS "https://$APP.$BASE_DOMAIN/up" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: ruby/setup-ruby@v1
+        if: inputs.action == 'rollback'
+        with:
+          ruby-version: "3.3"
+      - name: rollback
+        if: inputs.action == 'rollback'
+        working-directory: apps/${{ inputs.app }}
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_ARCH: ${{ vars.IMAGE_ARCH || 'amd64' }}
+        run: |
+          gem install kamal -v "~> 2.12" --no-document
+          export IMAGE_NAMESPACE="${GITHUB_REPOSITORY_OWNER,,}"
+          kamal rollback "$ARG"
+          curl -fsS "https://$APP.$BASE_DOMAIN/up" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: sql-readonly
+        if: inputs.action == 'sql-readonly'
+        run: |
+          db="${APP//-/_}"
+          printf '%s\n' "$ARG" | ssh "deploy@$APP_HOST" "docker exec -i lab-postgres psql -U ${db}_ro -d $db -v ON_ERROR_STOP=1 -P pager=off -f -" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: clickhouse-query
+        if: inputs.action == 'clickhouse-query'
+        run: |
+          [ -n "$OBS_HOST" ] || { echo "Нет OBS_HOST"; exit 1; }
+          printf '%s' "$ARG" | ssh "deploy@$OBS_HOST" 'sudo /usr/local/bin/lab-ch-query' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: backup-now
+        if: inputs.action == 'backup-now'
+        run: |
+          for h in "$APP_HOST" "$OBS_HOST"; do
+            [ -n "$h" ] || continue
+            ssh "deploy@$h" 'sudo systemctl start lab-backup.service && sudo journalctl -u lab-backup.service -n 20 --no-pager'
+          done
+
+      - name: set-sentry-dsn
+        if: inputs.action == 'set-sentry-dsn'
+        run: |
+          printf '%s\n' "$ARG" | ssh "deploy@$APP_HOST" "sudo tee /etc/lab/apps/$APP.sentry_dsn >/dev/null"
+          echo "DSN сохранён. Применится при следующем деплое или: gh workflow run provision.yml -f tags=app_env, затем ops restart." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: dns-check
+        if: inputs.action == 'dns-check'
+        run: |
+          [ -n "$BASE_DOMAIN" ] || { echo "Нет vars.BASE_DOMAIN"; exit 1; }
+          check() { got=$(dig +short "$1" A | tail -1); echo "$1 → ${got:-нет записи} (ждём $2) $([ "$got" = "$2" ] && echo ✅ || echo ❌)"; }
+          {
+            for a in $(ls apps); do check "$a.$BASE_DOMAIN" "$APP_HOST"; done
+            [ -n "$OBS_HOST" ] && for s in grafana errors flags status ch home; do check "$s.$BASE_DOMAIN" "$OBS_HOST"; done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: test-alert
+        if: inputs.action == 'test-alert'
+        run: |
+          [ -n "$TG_TOKEN" ] || { echo "Нет секретов TELEGRAM_*"; exit 1; }
+          curl -fsS "https://api.telegram.org/bot$TG_TOKEN/sendMessage" --data-urlencode "chat_id=$TG_CHAT" \
+            --data-urlencode "text=🔔 Пробная тревога лаборатории: уведомления работают." >/dev/null
+          echo "Отправлено" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: send-panel-passwords
+        if: inputs.action == 'send-panel-passwords'
+        run: |
+          [ -n "$TG_TOKEN" ] && [ -n "$OBS_HOST" ] || { echo "Нужны TELEGRAM_* и OBS_HOST"; exit 1; }
+          vals=$(ssh "deploy@$OBS_HOST" 'sudo /usr/local/bin/lab-panel-passwords')
+          while read -r v; do echo "::add-mask::$v"; done <<< "$vals"
+          g=$(sed -n 1p <<< "$vals"); b=$(sed -n 2p <<< "$vals"); p=$(sed -n 3p <<< "$vals")
+          text="🔑 Панели лаборатории
+          Grafana: https://grafana.$BASE_DOMAIN — admin / $g
+          Bugsink: https://errors.$BASE_DOMAIN — admin / $b
+          Flipt и home: https://flags.$BASE_DOMAIN — owner / $p
+          Сохрани в менеджер паролей и удали это сообщение."
+          curl -fsS "https://api.telegram.org/bot$TG_TOKEN/sendMessage" --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$text" >/dev/null
+          echo "Отправлено в Telegram" | tee -a "$GITHUB_STEP_SUMMARY"

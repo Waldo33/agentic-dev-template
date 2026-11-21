@@ -1,0 +1,84 @@
+# Тревоги по данным в ClickHouse → Telegram. Доступность и сертификаты проверяет Gatus.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: lab
+    folder: Лаборатория
+    interval: 1m
+    rules:
+      - uid: http-5xx
+        title: Много 5xx у приложения
+        condition: C
+        for: 5m
+        annotations:
+          summary: "Доля 5xx выше 2% за 5 минут — смотри логи и Bugsink, при необходимости откат (skill incident)."
+        labels: { severity: urgent }
+        data:
+          - refId: A
+            datasourceUid: clickhouse
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              editorType: sql
+              format: 1
+              queryType: table
+              rawSql: |
+                SELECT JSONExtractString(attrs, 'target') AS target,
+                       countIf(JSONExtractInt(attrs, 'status') >= 500) / greatest(count(), 1) AS value
+                FROM logs.container_logs
+                WHERE container = 'kamal-proxy' AND ts > now() - INTERVAL 5 MINUTE
+                  AND JSONHas(attrs, 'status')
+                GROUP BY target
+                HAVING count() >= 20
+          - refId: C
+            datasourceUid: __expr__
+            model: { type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0.02] } }] }
+
+      - uid: disk-full
+        title: Диск заполнен больше чем на 80%
+        condition: C
+        for: 10m
+        labels: { severity: urgent }
+        annotations:
+          summary: "Чистка: docker system prune, ротация логов, docs/runbooks/server-down.md."
+        data:
+          - refId: A
+            datasourceUid: clickhouse
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              editorType: sql
+              format: 1
+              queryType: table
+              rawSql: |
+                SELECT host,
+                       maxIf(value, name = 'host_filesystem_used_ratio') AS value
+                FROM metrics.host
+                WHERE ts > now() - INTERVAL 10 MINUTE
+                GROUP BY host
+          - refId: C
+            datasourceUid: __expr__
+            model: { type: threshold, expression: A, conditions: [{ evaluator: { type: gt, params: [0.8] } }] }
+
+      - uid: host-silent
+        title: Сервер перестал присылать метрики
+        condition: C
+        for: 5m
+        labels: { severity: urgent }
+        annotations:
+          summary: "Нет метрик 10 минут: сервер лежит или Vector остановлен. ops.yml status."
+        noDataState: Alerting
+        data:
+          - refId: A
+            datasourceUid: clickhouse
+            relativeTimeRange: { from: 600, to: 0 }
+            model:
+              editorType: sql
+              format: 1
+              queryType: table
+              rawSql: |
+                SELECT host, count() AS value
+                FROM metrics.host
+                WHERE ts > now() - INTERVAL 10 MINUTE
+                GROUP BY host
+          - refId: C
+            datasourceUid: __expr__
+            model: { type: threshold, expression: A, conditions: [{ evaluator: { type: lt, params: [1] } }] }

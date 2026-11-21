@@ -1,0 +1,60 @@
+# Ночные копии в S3 (restic, шифрование паролем RESTIC_PASSWORD) + пульс в Gatus.
+# app: дамп всего Postgres. obs: данные Bugsink, Grafana, Gatus, Flipt и выгрузка analytics.events.
+- name: Нужны S3 и пароль restic
+  ansible.builtin.meta: end_role
+  when: s3_bucket | length == 0 or restic_password | length == 0
+
+- name: env для restic
+  ansible.builtin.copy:
+    dest: /etc/lab/backup.env
+    content: |
+      RESTIC_REPOSITORY=s3:{{ s3_endpoint }}/{{ s3_bucket }}/{{ inventory_hostname }}
+      RESTIC_PASSWORD={{ restic_password }}
+      AWS_ACCESS_KEY_ID={{ s3_access_key }}
+      AWS_SECRET_ACCESS_KEY={{ s3_secret_key }}
+      GATUS_URL=https://status.{{ base_domain }}
+      GATUS_KEY=backups_backup-{{ inventory_hostname }}
+      GATUS_TOKEN={{ (hostvars['obs']['obs_secrets'] | default({})).GATUS_PUSH_TOKEN | default('') }}
+      HOST_ROLE={{ inventory_hostname }}
+    mode: "0600"
+  no_log: true
+
+- name: Скрипт бэкапа
+  ansible.builtin.copy:
+    dest: /usr/local/bin/lab-backup
+    src: lab-backup.sh
+    mode: "0750"
+
+- name: systemd-юнит и таймер
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    content: "{{ item.content }}"
+    mode: "0644"
+  loop:
+    - name: lab-backup.service
+      content: |
+        [Unit]
+        Description=Бэкап лаборатории в S3
+        After=docker.service
+        [Service]
+        Type=oneshot
+        EnvironmentFile=/etc/lab/backup.env
+        ExecStart=/usr/local/bin/lab-backup
+    - name: lab-backup.timer
+      content: |
+        [Unit]
+        Description=Ночной бэкап
+        [Timer]
+        OnCalendar=*-*-* 03:30:00
+        RandomizedDelaySec=15m
+        Persistent=true
+        [Install]
+        WantedBy=timers.target
+  register: units
+
+- name: Включить таймер
+  ansible.builtin.systemd:
+    name: lab-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: "{{ units.changed }}"

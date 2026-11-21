@@ -1,0 +1,35 @@
+# Vector на каждом сервере: логи всех контейнеров (с меткой service от Kamal) и метрики хоста → ClickHouse на obs.
+# Без obs (нет секретов) роль пропускается.
+- name: Нужен сервер наблюдаемости
+  ansible.builtin.meta: end_role
+  when: (hostvars['obs']['obs_secrets'] | default({})).CH_WRITER_PASSWORD is not defined
+
+- name: Папки Vector
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop: [/opt/lab/vector, /var/lib/lab/vector]
+
+- name: Конфиг Vector
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../vector/vector.yaml.j2"
+    dest: /opt/lab/vector/vector.yaml
+    mode: "0600"
+  vars:
+    ch_password: "{{ hostvars['obs']['obs_secrets'].CH_WRITER_PASSWORD }}"
+    host_label: "{{ inventory_hostname }}"
+  no_log: true
+  register: vector_conf
+
+- name: compose Vector
+  ansible.builtin.copy:
+    dest: /opt/lab/vector/compose.yml
+    src: "{{ playbook_dir }}/../compose/vector.yml"
+    mode: "0644"
+  register: vector_compose
+
+- name: Поднять Vector
+  ansible.builtin.command: docker compose -f /opt/lab/vector/compose.yml up -d {{ '--force-recreate' if vector_conf.changed else '' }}
+  register: vector_up
+  changed_when: "'Started' in vector_up.stderr or 'Recreated' in vector_up.stderr or 'Created' in vector_up.stderr"

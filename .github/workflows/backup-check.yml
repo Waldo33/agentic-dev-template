@@ -1,0 +1,67 @@
+# Раз в неделю: восстановить последнюю копию Postgres из S3 во временный Postgres на раннере
+# и убедиться, что базы приложений на месте. Копия, которую не восстанавливали, — не копия.
+name: backup-check
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    environment: production
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      RESTIC_REPOSITORY: s3:${{ secrets.S3_ENDPOINT }}/${{ secrets.S3_BUCKET }}/app
+      RESTIC_PASSWORD: ${{ secrets.RESTIC_PASSWORD }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_KEY }}
+      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: apps
+      - name: Есть ли копии
+        id: gate
+        run: |
+          if [ -z "${{ secrets.S3_BUCKET }}" ] || [ -z "$RESTIC_PASSWORD" ]; then
+            echo "Бэкапы не настроены (нет S3_* / RESTIC_PASSWORD) — пропускаю." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Восстановить и проверить
+        if: steps.gate.outputs.go == 'true'
+        env:
+          PGPASSWORD: postgres
+        run: |
+          sudo apt-get install -y -qq restic postgresql-client >/dev/null
+          restic snapshots --tag postgres --latest 1 | tee -a "$GITHUB_STEP_SUMMARY"
+          restic dump --tag postgres --host app latest /postgres.sql > /tmp/dump.sql
+          psql -h localhost -U postgres -q -f /tmp/dump.sql > /tmp/restore.log 2>&1 || true
+          missing=0
+          for a in $(ls apps); do
+            db="${a//-/_}"
+            if psql -h localhost -U postgres -tAc "select 1 from pg_database where datname='$db'" | grep -q 1; then
+              n=$(psql -h localhost -U postgres -d "$db" -tAc "select count(*) from information_schema.tables where table_schema='public'")
+              echo "✅ $db: таблиц $n" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "❌ $db: нет в копии" | tee -a "$GITHUB_STEP_SUMMARY"; missing=1
+            fi
+          done
+          exit $missing
+      - name: Telegram при провале
+        if: failure() && env.TG_TOKEN != ''
+        run: |
+          curl -fsS "https://api.telegram.org/bot$TG_TOKEN/sendMessage" --data-urlencode "chat_id=$TG_CHAT" \
+            --data-urlencode "text=🔴 Проверка бэкапа провалилась: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >/dev/null

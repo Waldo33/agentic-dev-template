@@ -1,0 +1,123 @@
+# Базовая система: пользователь deploy, SSH только по ключу, файрвол, автообновления, swap.
+# Первый прогон идёт под root (provision.yml с bootstrap=true), дальше — под deploy.
+- name: Пакеты
+  ansible.builtin.apt:
+    name: [ufw, fail2ban, unattended-upgrades, curl, ca-certificates, jq, openssl, restic, gnupg]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Часовой пояс UTC
+  ansible.builtin.command: timedatectl set-timezone UTC
+  changed_when: false
+
+- name: Пользователь deploy
+  ansible.builtin.user:
+    name: deploy
+    shell: /bin/bash
+    create_home: true
+
+- name: SSH-ключ deploy
+  ansible.builtin.copy:
+    dest: /home/deploy/.ssh/authorized_keys
+    content: "{{ deploy_public_key }}\n"
+    owner: deploy
+    group: deploy
+    mode: "0600"
+  when: deploy_public_key | length > 0
+
+- name: Папка .ssh deploy
+  ansible.builtin.file:
+    path: /home/deploy/.ssh
+    state: directory
+    owner: deploy
+    group: deploy
+    mode: "0700"
+
+- name: sudo без пароля для deploy (нужен Ansible и ops.yml)
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/90-deploy
+    content: "deploy ALL=(ALL) NOPASSWD:ALL\n"
+    mode: "0440"
+    validate: visudo -cf %s
+
+- name: SSH — только по ключу, без root
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/10-lab.conf
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      MaxAuthTries 3
+    mode: "0644"
+  notify: Перезапустить ssh
+  when: deploy_public_key | length > 0
+
+- name: Файрвол — разрешённые порты
+  ansible.builtin.command: "ufw allow {{ item }}"
+  loop: ["22/tcp", "80/tcp", "443/tcp"]
+  register: ufw_rule
+  changed_when: "'Skipping' not in ufw_rule.stdout"
+
+- name: Файрвол — включить
+  ansible.builtin.shell: |
+    ufw status | grep -q 'Status: active' && echo already || { ufw --force enable >/dev/null && echo enabled; }
+  register: ufw_enable
+  changed_when: "'enabled' in ufw_enable.stdout"
+
+- name: fail2ban для ssh
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/lab.local
+    content: |
+      [sshd]
+      enabled = true
+      maxretry = 5
+      bantime = 1h
+    mode: "0644"
+  notify: Перезапустить fail2ban
+
+- name: Автообновления безопасности
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    mode: "0644"
+
+- name: Лимит журнала systemd
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/10-lab.conf
+    content: |
+      [Journal]
+      SystemMaxUse=500M
+    mode: "0644"
+  notify: Перезапустить journald
+
+- name: Swap 2 ГБ
+  ansible.builtin.shell: |
+    set -e
+    if swapon --show | grep -q /swapfile; then echo exists; exit 0; fi
+    fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+    grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    echo created
+  args:
+    executable: /bin/bash
+  register: swap
+  changed_when: "'created' in swap.stdout"
+
+- name: Ядро — много соединений, swap только при нужде
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/90-lab.conf
+    content: |
+      vm.swappiness = 10
+      net.core.somaxconn = 4096
+      fs.file-max = 1000000
+    mode: "0644"
+  notify: Применить sysctl
+
+- name: Папки лаборатории
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop: [/etc/lab, /etc/lab/apps, /opt/lab, /var/lib/lab]

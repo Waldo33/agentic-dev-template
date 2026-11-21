@@ -1,0 +1,119 @@
+# Vector на сервере {{ host_label }}. Рендерит Ansible (роль vector); проверка в CI: infra/scripts/validate.sh.
+data_dir: /var/lib/vector
+
+sources:
+  docker:
+    type: docker_logs
+    exclude_containers: [lab-vector]
+  host:
+    type: host_metrics
+    scrape_interval_secs: 30
+    collectors: [cpu, memory, filesystem, load, network]
+    filesystem:
+      mountpoints:
+        includes: ["/"]
+
+transforms:
+  logs:
+    type: remap
+    inputs: [docker]
+    source: |
+      raw = string(.message) ?? ""
+      service = string(.label.service) ?? string(.container_name) ?? "unknown"
+      level = "info"
+      msg = raw
+      attrs = ""
+      parsed, err = parse_json(raw)
+      if err == null && is_object(parsed) {
+        obj = object!(parsed)
+        attrs = raw
+        l = obj.level
+        if is_integer(l) {
+          n = int!(l)
+          level = if n >= 50 { "error" } else if n >= 40 { "warn" } else if n >= 30 { "info" } else { "debug" }
+        } else if is_string(l) {
+          level = downcase(string!(l))
+        }
+        if is_string(obj.msg) {
+          msg = string!(obj.msg)
+        } else if is_string(obj.message) {
+          msg = string!(obj.message)
+        }
+      } else if .stream == "stderr" {
+        level = "error"
+      }
+      . = {
+        "ts": .timestamp,
+        "host": "{{ host_label }}",
+        "container": string(.container_name) ?? "",
+        "service": service,
+        "level": level,
+        "message": msg,
+        "attrs": attrs
+      }
+
+  metrics_as_logs:
+    type: metric_to_log
+    inputs: [host]
+
+  metrics:
+    type: remap
+    inputs: [metrics_as_logs]
+    source: |
+      v = null
+      if exists(.gauge.value) {
+        v = .gauge.value
+      } else if exists(.counter.value) {
+        v = .counter.value
+      }
+      if v == null { abort }
+      tags = {}
+      if is_object(.tags) { tags = object!(.tags) }
+      . = {
+        "ts": .timestamp,
+        "host": "{{ host_label }}",
+        "name": (string(.namespace) ?? "host") + "_" + (string(.name) ?? "unknown"),
+        "tags": tags,
+        "value": to_float(v) ?? 0.0
+      }
+
+sinks:
+  clickhouse_logs:
+    type: clickhouse
+    inputs: [logs]
+    endpoint: "https://ch.{{ base_domain }}"
+    database: logs
+    table: container_logs
+    auth:
+      strategy: basic
+      user: writer
+      password: "{{ ch_password }}"
+    compression: gzip
+    date_time_best_effort: true
+    skip_unknown_fields: true
+    batch:
+      timeout_secs: 5
+    buffer:
+      type: disk
+      max_size: 536870912
+      when_full: drop_newest
+
+  clickhouse_metrics:
+    type: clickhouse
+    inputs: [metrics]
+    endpoint: "https://ch.{{ base_domain }}"
+    database: metrics
+    table: host
+    auth:
+      strategy: basic
+      user: writer
+      password: "{{ ch_password }}"
+    compression: gzip
+    date_time_best_effort: true
+    skip_unknown_fields: true
+    batch:
+      timeout_secs: 10
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest

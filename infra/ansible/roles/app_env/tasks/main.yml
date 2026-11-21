@@ -1,0 +1,48 @@
+# Для каждого приложения из apps/*: своя база и пользователь, read-only роль для агента,
+# env-файл /etc/lab/apps/<имя>.env (монтируется в контейнер, владелец — uid 1001 из Dockerfile).
+- name: Скрипт создания базы приложения
+  ansible.builtin.copy:
+    dest: /usr/local/bin/lab-app-db
+    src: lab-app-db.sh
+    mode: "0750"
+
+- name: База и пользователь приложения
+  ansible.builtin.command: "/usr/local/bin/lab-app-db {{ item }}"
+  loop: "{{ lab_apps }}"
+  register: appdb
+  changed_when: "'created' in appdb.stdout"
+  no_log: false
+
+- name: Пароли баз приложений
+  ansible.builtin.slurp:
+    src: "/etc/lab/apps/{{ item }}.pg"
+  loop: "{{ lab_apps }}"
+  register: app_pg
+  no_log: true
+
+- name: DSN Bugsink приложений (если заданы через ops.yml set-sentry-dsn)
+  ansible.builtin.stat:
+    path: "/etc/lab/apps/{{ item }}.sentry_dsn"
+  loop: "{{ lab_apps }}"
+  register: app_dsn_stat
+
+- name: Прочитать DSN
+  ansible.builtin.slurp:
+    src: "/etc/lab/apps/{{ item.item }}.sentry_dsn"
+  loop: "{{ app_dsn_stat.results | selectattr('stat.exists') | list }}"
+  register: app_dsn
+
+- name: env-файлы приложений
+  ansible.builtin.template:
+    src: app.env.j2
+    dest: "/etc/lab/apps/{{ item.0 }}.env"
+    owner: "1001"
+    group: "1001"
+    mode: "0400"
+  loop: "{{ lab_apps | zip(app_pg.results | map(attribute='content') | map('b64decode') | map('trim')) | list }}"
+  vars:
+    app: "{{ item.0 }}"
+    pg_password: "{{ item.1 }}"
+    obs: "{{ hostvars['obs']['obs_secrets'] | default({}) if 'obs' in hostvars else {} }}"
+    sentry_dsn: "{{ (app_dsn.results | default([]) | selectattr('item.item', 'equalto', item.0) | map(attribute='content') | map('b64decode') | map('trim') | first) | default('') }}"
+  no_log: true

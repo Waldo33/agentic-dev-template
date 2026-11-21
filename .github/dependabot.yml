@@ -1,0 +1,22 @@
+# Обновления зависимостей пачками раз в неделю. Патчи и минорные с зелёным CI агент мержит сам (скилл ship).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker-compose
+    directories: ["/infra/compose", "/infra/compose/obs", "/infra/compose/app"]
+    schedule: { interval: weekly, day: monday }
+    groups:
+      images:
+        patterns: ["*"]

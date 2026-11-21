@@ -1,0 +1,13 @@
+<clickhouse>
+    <!-- Сервер на 8 ГБ: не съедать всю память, не плодить служебные логи. -->
+    <max_server_memory_usage_to_ram_ratio>0.6</max_server_memory_usage_to_ram_ratio>
+    <logger>
+        <level>warning</level>
+        <console>1</console>
+    </logger>
+    <query_thread_log remove="1"/>
+    <trace_log remove="1"/>
+    <text_log remove="1"/>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+</clickhouse>

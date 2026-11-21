@@ -1,0 +1,63 @@
+# Gatus: внешние проверки и статус-страница. Рендерит Ansible: список приложений — из apps/*.
+storage:
+  type: sqlite
+  path: /data/gatus.db
+
+ui:
+  title: Статус лаборатории
+  header: Статус
+
+{% if telegram_bot_token %}
+alerting:
+  telegram:
+    token: "{{ telegram_bot_token }}"
+    id: "{{ telegram_chat_id }}"
+    default-alert:
+      failure-threshold: 2
+      success-threshold: 2
+      send-on-resolved: true
+{% endif %}
+
+endpoints:
+{% for app in lab_apps %}
+  - name: {{ app }}
+    group: приложения
+    url: https://{{ app }}.{{ base_domain }}/up
+    interval: 1m
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY].ok == true"
+      - "[RESPONSE_TIME] < 2000"
+      - "[CERTIFICATE_EXPIRATION] > 336h"
+{% if telegram_bot_token %}
+    alerts:
+      - type: telegram
+{% endif %}
+{% endfor %}
+{% for host in ['grafana', 'errors', 'flags'] %}
+  - name: {{ host }}
+    group: платформа
+    url: https://{{ host }}.{{ base_domain }}
+    interval: 5m
+    conditions:
+      - "[STATUS] < 500"
+      - "[CERTIFICATE_EXPIRATION] > 336h"
+{% if telegram_bot_token %}
+    alerts:
+      - type: telegram
+{% endif %}
+{% endfor %}
+
+# Пульс бэкапов: скрипт lab-backup после успешной копии шлёт сюда отметку (Bearer GATUS_PUSH_TOKEN).
+external-endpoints:
+{% for host in ['app', 'obs'] %}
+  - name: backup-{{ host }}
+    group: backups
+    token: "{{ obs.GATUS_PUSH_TOKEN }}"
+    heartbeat:
+      interval: 26h
+{% if telegram_bot_token %}
+    alerts:
+      - type: telegram
+{% endif %}
+{% endfor %}

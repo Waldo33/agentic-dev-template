@@ -1,0 +1,31 @@
+# Адреса и домен приходят из переменных окружения (их задаёт workflow из vars/secrets GitHub).
+# Нет OBS_HOST — сервер наблюдаемости пропускается, приложения работают без него.
+all:
+  vars:
+    ansible_user: "{{ lookup('env', 'ANSIBLE_SSH_USER') | default('deploy', true) }}"
+    ansible_become: true
+    base_domain: "{{ lookup('env', 'BASE_DOMAIN') }}"
+    app_host_ip: "{{ lookup('env', 'APP_HOST') }}"
+    obs_host_ip: "{{ lookup('env', 'OBS_HOST') }}"
+    acme_email: "{{ lookup('env', 'ACME_EMAIL') | default('admin@' + lookup('env', 'BASE_DOMAIN'), true) }}"
+    telegram_bot_token: "{{ lookup('env', 'TELEGRAM_BOT_TOKEN') }}"
+    telegram_chat_id: "{{ lookup('env', 'TELEGRAM_CHAT_ID') }}"
+    deploy_public_key: "{{ lookup('env', 'DEPLOY_PUBLIC_KEY') }}"
+    # Список приложений (имена папок apps/*) — JSON из workflow
+    lab_apps: "{{ lookup('env', 'LAB_APPS') | default('[]', true) | from_json }}"
+    s3_endpoint: "{{ lookup('env', 'S3_ENDPOINT') }}"
+    s3_bucket: "{{ lookup('env', 'S3_BUCKET') }}"
+    s3_access_key: "{{ lookup('env', 'S3_ACCESS_KEY') }}"
+    s3_secret_key: "{{ lookup('env', 'S3_SECRET_KEY') }}"
+    restic_password: "{{ lookup('env', 'RESTIC_PASSWORD') }}"
+    flipt_git_remote: "{{ lookup('env', 'FLIPT_GIT_REMOTE') }}"
+    flipt_git_token: "{{ lookup('env', 'FLIPT_GIT_TOKEN') }}"
+  children:
+    app_servers:
+      hosts:
+        app:
+          ansible_host: "{{ lookup('env', 'APP_HOST') }}"
+    obs_servers:
+      hosts:
+        obs:
+          ansible_host: "{{ lookup('env', 'OBS_HOST') }}"

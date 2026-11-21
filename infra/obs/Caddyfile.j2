@@ -1,0 +1,51 @@
+# Caddy на obs: HTTPS для панелей. Рендерит Ansible (роль obs_stack), хэши паролей — из /etc/lab/obs/hashes.env.
+{
+	email {{ acme_email }}
+}
+
+(owner_only) {
+	basic_auth {
+		owner {{ obs.PANEL_HASH }}
+	}
+}
+
+(servers_only) {
+	@outside not remote_ip {{ app_host_ip }} {{ obs_host_ip }}
+	respond @outside 403
+}
+
+home.{{ base_domain }} {
+	import owner_only
+	root * /srv/home
+	file_server
+}
+
+# Grafana — свой вход (admin / GRAFANA_ADMIN_PASSWORD)
+grafana.{{ base_domain }} {
+	reverse_proxy grafana:3000
+}
+
+# Bugsink — свой вход; SDK шлёт ошибки сюда же (через туннели приложений)
+errors.{{ base_domain }} {
+	reverse_proxy bugsink:8000
+}
+
+# Статус-страница публичная
+status.{{ base_domain }} {
+	reverse_proxy gatus:8080
+}
+
+# Флаги: панель для владельца, приложения ходят под своим логином
+flags.{{ base_domain }} {
+	basic_auth {
+		owner {{ obs.PANEL_HASH }}
+		apps {{ obs.FLAGS_APP_HASH }}
+	}
+	reverse_proxy flipt:8080
+}
+
+# ClickHouse HTTP: только с наших серверов, дальше — пользователи writer/reader ClickHouse
+ch.{{ base_domain }} {
+	import servers_only
+	reverse_proxy clickhouse:8123
+}

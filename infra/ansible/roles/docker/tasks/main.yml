@@ -1,0 +1,45 @@
+# Docker Engine + compose из официального репозитория, ротация логов, сеть kamal (общая для приложений и Postgres).
+- name: Репозиторий Docker
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [stable]
+    signed_by: https://download.docker.com/linux/ubuntu/gpg
+    architectures: ["{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"]
+
+- name: Пакеты Docker
+  ansible.builtin.apt:
+    name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+    state: present
+    update_cache: true
+
+- name: Логи контейнеров — ротация и метка service (Kamal её ставит), чтобы Vector знал, чьи логи
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "20m", "max-file": "5", "labels": "service" },
+        "live-restore": true
+      }
+    mode: "0644"
+  notify: Перезапустить docker
+
+- name: deploy в группе docker (Kamal заходит под deploy)
+  ansible.builtin.user:
+    name: deploy
+    groups: docker
+    append: true
+
+- name: Docker запущен
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Сеть kamal
+  ansible.builtin.shell: docker network inspect kamal >/dev/null 2>&1 && echo exists || docker network create kamal
+  register: net
+  changed_when: "'exists' not in net.stdout"

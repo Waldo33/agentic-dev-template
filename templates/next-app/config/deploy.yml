@@ -1,0 +1,44 @@
+# Kamal 2: как выкатывать __APP__ на сервер `app`. Значения окружения подставляет пайплайн
+# (vars и secrets GitHub). Образ собирает и пушит сам пайплайн, Kamal только выкатывает: `kamal deploy -P --version=<sha>`.
+service: lab-__APP__
+image: <%= ENV.fetch("IMAGE_NAMESPACE") %>/lab-__APP__
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch("APP_HOST") %>
+    options:
+      memory: 512m
+      cpus: 1
+
+proxy:
+  ssl: true
+  host: __APP__.<%= ENV.fetch("BASE_DOMAIN") %>
+  app_port: 3000
+  healthcheck:
+    path: /up
+    interval: 2
+    timeout: 3
+
+registry:
+  server: ghcr.io
+  username: <%= ENV.fetch("REGISTRY_USER") %>
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  arch: <%= ENV.fetch("IMAGE_ARCH", "amd64") %>
+
+ssh:
+  user: deploy
+
+env:
+  clear:
+    APP_ENV: production
+
+volumes:
+  - /etc/lab/apps/__APP__.env:/run/secrets/app.env:ro
+
+deploy_timeout: 90
+drain_timeout: 30
+retain_containers: 5

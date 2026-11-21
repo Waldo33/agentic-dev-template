@@ -1,0 +1,28 @@
+# Пример: флаги приложения hello. Скопируй в <app>/features.yaml и поменяй namespace.key.
+version: "1.4"
+namespace:
+  key: hello
+  name: hello
+flags:
+  - key: release_greeting_v2
+    name: Новое приветствие на главной
+    type: BOOLEAN_FLAG_TYPE
+    enabled: false
+    rollouts:
+      # сначала владельцу (приложение передаёт контекст role=owner)
+      - segment:
+          key: owner
+          value: true
+      # потом процент аудитории: поменять 0 на 10, 50, 100
+      - threshold:
+          percentage: 0
+          value: true
+segments:
+  - key: owner
+    name: Владелец
+    match_type: ANY_MATCH_TYPE
+    constraints:
+      - type: STRING_COMPARISON_TYPE
+        property: role
+        operator: eq
+        value: owner

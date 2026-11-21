@@ -1,0 +1,45 @@
+# Сторож снаружи серверов: каждые 10 минут проверяет статус-страницу (за самим obs) и /up приложений.
+# Две неудачи подряд с паузой минуту — сообщение в Telegram напрямую.
+name: watchdog
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    if: vars.BASE_DOMAIN != ''
+    env:
+      BASE_DOMAIN: ${{ vars.BASE_DOMAIN }}
+      OBS_HOST: ${{ vars.OBS_HOST }}
+      TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: apps
+      - name: Проверить
+        run: |
+          urls=()
+          [ -n "$OBS_HOST" ] && urls+=("https://status.$BASE_DOMAIN")
+          for a in $(ls apps); do urls+=("https://$a.$BASE_DOMAIN/up"); done
+          probe() { curl -fsS -o /dev/null --max-time 15 "$1"; }
+          down=()
+          for u in "${urls[@]}"; do probe "$u" || down+=("$u"); done
+          [ ${#down[@]} -eq 0 ] && { echo "Всё отвечает"; exit 0; }
+          sleep 60
+          still=()
+          for u in "${down[@]}"; do probe "$u" || still+=("$u"); done
+          [ ${#still[@]} -eq 0 ] && { echo "Моргнуло и прошло: ${down[*]}"; exit 0; }
+          printf 'Не отвечает: %s\n' "${still[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -n "$TG_TOKEN" ]; then
+            text="🚨 Сторож: не отвечает $(printf '\n%s' "${still[@]}")
+          Дальше: gh workflow run ops.yml -f action=status, скилл incident."
+            curl -fsS "https://api.telegram.org/bot$TG_TOKEN/sendMessage" --data-urlencode "chat_id=$TG_CHAT" --data-urlencode "text=$text" >/dev/null || true
+          fi
+          exit 1

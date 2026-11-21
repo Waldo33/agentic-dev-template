@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Лаборатория</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 560px; margin: 0 auto; padding: 32px 20px; background: #111; color: #eee; }
+  a { color: #7fb0ff; } h2 { margin-top: 28px; font-size: 18px; } li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<h1>Лаборатория</h1>
+<h2>Идеи</h2>
+<ul>
+{% for app in lab_apps %}
+  <li><a href="https://{{ app }}.{{ base_domain }}">{{ app }}</a></li>
+{% endfor %}
+</ul>
+<h2>Панели</h2>
+<ul>
+  <li><a href="https://grafana.{{ base_domain }}/d/lab-apps">Grafana</a> — метрики, воронки, логи, ресурсы</li>
+  <li><a href="https://errors.{{ base_domain }}">Bugsink</a> — ошибки</li>
+  <li><a href="https://flags.{{ base_domain }}">Flipt</a> — фича-флаги</li>
+  <li><a href="https://status.{{ base_domain }}">Статус</a> — доступность и бэкапы</li>
+</ul>
+<p>Пароли панелей: <code>gh workflow run ops.yml -f action=send-panel-passwords</code> — придут в Telegram.</p>
+</body>
+</html>
