@@ -65,11 +65,12 @@ sleep 3
 docker exec lab-ch-test bash /docker-entrypoint-initdb.d/00-users.sh
 docker exec -i lab-ch-test sh -c 'clickhouse-client --user admin --password admin --multiquery' < clickhouse/init/01-tables.sql
 ch() { curl -fsS "http://localhost:18123/?$1" --data-binary @-; }
-echo '{"ts":"2026-01-01 10:00:00.000","app":"hello","event":"page_view","anon_id":"a1","session_id":"s1","user_id":"","path":"/","props":"{}","flags":{"release_x":"true"},"release":"r1","country":"TR","device":"mobile"}' \
+NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)   # свежие даты: строки старше TTL ClickHouse удаляет сразу
+echo '{"ts":"'"$NOW"'","app":"hello","event":"page_view","anon_id":"a1","session_id":"s1","user_id":"","path":"/","props":"{}","flags":{"release_x":"true"},"release":"r1","country":"TR","device":"mobile"}' \
   | ch "user=writer&password=writer&query=INSERT%20INTO%20analytics.events%20FORMAT%20JSONEachRow&async_insert=1&wait_for_async_insert=1&date_time_input_format=best_effort"
-echo '{"ts":"2026-01-01T10:00:00.123Z","host":"app","container":"kamal-proxy","service":"kamal-proxy","level":"info","message":"Request","attrs":"{\"status\":502}"}' \
+echo '{"ts":"'"$NOW"'","host":"app","container":"kamal-proxy","service":"kamal-proxy","level":"info","message":"Request","attrs":"{\"status\":502}"}' \
   | ch "user=writer&password=writer&query=INSERT%20INTO%20logs.container_logs%20FORMAT%20JSONEachRow&date_time_input_format=best_effort"
-echo '{"ts":"2026-01-01T10:00:00Z","host":"app","name":"host_load1","tags":{"collector":"load"},"value":0.5}' \
+echo '{"ts":"'"$NOW"'","host":"app","name":"host_load1","tags":{"collector":"load"},"value":0.5}' \
   | ch "user=writer&password=writer&query=INSERT%20INTO%20metrics.host%20FORMAT%20JSONEachRow&date_time_input_format=best_effort"
 n=$(echo "SELECT (SELECT count() FROM analytics.events) + (SELECT count() FROM logs.container_logs) + (SELECT count() FROM metrics.host)" | ch "user=reader&password=reader")
 [ "$n" = "3" ] || { echo "ожидали 3 строки, получили $n"; exit 1; }
@@ -100,15 +101,15 @@ step "Grafana: провижининг дашборда, источника и т
 GF_IMAGE=$(awk '/image: grafana/{print $2}' compose/obs/compose.yml)
 docker rm -f lab-gf-test >/dev/null 2>&1 || true
 docker run -d --name lab-gf-test -p 13000:3000 \
-  -e GF_SECURITY_ADMIN_PASSWORD=admin -e GF_PLUGINS_PREINSTALL=grafana-clickhouse-datasource \
+  -e GF_SECURITY_ADMIN_PASSWORD=validate -e GF_PLUGINS_PREINSTALL=grafana-clickhouse-datasource \
   -e CH_READER_PASSWORD=x -e TELEGRAM_BOT_TOKEN=123:x -e TELEGRAM_CHAT_ID=1 \
   -v "$PWD/obs/grafana/provisioning:/etc/grafana/provisioning:ro" \
   -v "$PWD/obs/grafana/dashboards:/var/lib/grafana-dashboards:ro" "$GF_IMAGE" >/dev/null
 for _ in $(seq 90); do curl -fs http://localhost:13000/api/health >/dev/null 2>&1 && break; sleep 2; done
 sleep 5
-curl -fsS -u admin:admin "http://localhost:13000/api/dashboards/uid/lab-apps" | jq -e '.dashboard.panels | length > 5' >/dev/null
-curl -fsS -u admin:admin "http://localhost:13000/api/datasources/uid/clickhouse" | jq -e '.type == "grafana-clickhouse-datasource"' >/dev/null
-rules=$(curl -fsS -u admin:admin "http://localhost:13000/api/v1/provisioning/alert-rules" | jq length)
+curl -fsS -u "admin:validate" "http://localhost:13000/api/dashboards/uid/lab-apps" | jq -e '.dashboard.panels | length > 5' >/dev/null  # gitleaks:allow — временная Grafana в CI
+curl -fsS -u "admin:validate" "http://localhost:13000/api/datasources/uid/clickhouse" | jq -e '.type == "grafana-clickhouse-datasource"' >/dev/null  # gitleaks:allow — временная Grafana в CI
+rules=$(curl -fsS -u "admin:validate" "http://localhost:13000/api/v1/provisioning/alert-rules" | jq length)  # gitleaks:allow — временная Grafana в CI
 [ "$rules" -ge 3 ] || { echo "тревог $rules, ожидали ≥ 3"; docker logs lab-gf-test | grep -iE 'error|fail' | tail -20; exit 1; }
 echo "ok Grafana: дашборд, источник, $rules тревоги"
 docker rm -f lab-gf-test >/dev/null

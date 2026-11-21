@@ -19,6 +19,8 @@
 - Docker Hub, CDN Playwright и большинство сайтов из облачной сессии недоступны. Образы и e2e в Chromium проверяет CI. Локально e2e: системный Chrome через `PW_CHROMIUM_PATH=/usr/bin/google-chrome`.
 - Postgres локально без Docker: `/usr/lib/postgresql/*/bin/initdb` + `pg_ctl` от пользователя `postgres` (см. `docs/runbooks/local-dev.md`).
 - SSH на серверы из сессии нет — только `ops.yml` и `provision.yml`.
+- `gh run download` из сессии не работает: артефакты лежат в хранилище Azure, оно закрыто. Ошибки — из `gh run view --log-failed`, скриншоты — воспроизведением e2e локально.
+- Настройки репозитория (`is_template`, описание) через API из сессии менять нельзя — только владелец в интерфейсе GitHub.
 
 ## Требует проверки на первом живом развёртывании
 

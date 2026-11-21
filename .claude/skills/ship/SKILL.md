@@ -32,7 +32,7 @@ gh run watch <id> --exit-status
 | Шаг | Что делать |
 |---|---|
 | check | `gh run view <id> --log-failed`, воспроизведи локально `pnpm check`, чини |
-| e2e | `gh run download <id> -n e2e-<app>` → скриншоты и трейс Playwright; чини, добавь проверку |
+| e2e | в логе job видно упавший шаг и ошибку; артефакты (скриншоты) из среды агента не скачать — воспроизведи e2e локально (`docs/runbooks/local-dev.md`), посмотри скриншоты, чини |
 | deploy | обычно доступ/секреты/сервер: `gh run view --log-failed`; `ops.yml -f action=status` |
 | verify (откатили) | прод уже на прошлой версии. Смотри логи нового контейнера: `ops.yml -f action=logs -f app=<app>`, ошибки — `errors-recent`. Чини следующим коммитом |
 

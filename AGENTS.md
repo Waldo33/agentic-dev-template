@@ -60,7 +60,7 @@ gh workflow run ops.yml -f action=logs -f app=<имя>   # операции на
 
 ## Где смотреть прод
 
-Нет SSH из среды агента — всё через Actions: `gh run view --log-failed`, `gh run download` (скриншоты e2e), `gh workflow run ops.yml` (логи, SQL только чтение, ClickHouse, откат, бэкап). Если владелец открыл домен в сетевых настройках среды — можно и напрямую: `https://<имя>.<домен>/up`, Grafana, Bugsink, Flipt. Скилл `ops`.
+Нет SSH из среды агента — всё через Actions: `gh run view --log-failed`, сводки запусков, `gh workflow run ops.yml` (логи, SQL только чтение, ClickHouse, откат, бэкап). Если владелец открыл домен в сетевых настройках среды — можно и напрямую: `https://<имя>.<домен>/up`, Grafana, Bugsink, Flipt. Скилл `ops`.
 
 ## Скиллы и агенты
 
