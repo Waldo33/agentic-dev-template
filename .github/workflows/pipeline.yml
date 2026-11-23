@@ -31,7 +31,7 @@ jobs:
       deploy: ${{ steps.deploy.outputs.deploy }}
       infra: ${{ steps.infra.outputs.infra }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: apps
@@ -64,11 +64,11 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -87,7 +87,7 @@ jobs:
           pnpm --filter tpl-check typecheck && pnpm --filter tpl-check test
           rm -rf apps/tpl-check
       - name: Секреты не утекли в код
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -96,7 +96,7 @@ jobs:
     if: needs.plan.outputs.infra == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: pip install --quiet ansible-core jinja2
       - name: Проверка инфраструктуры (Ansible, шаблоны, compose, Vector, Caddy, ClickHouse, Postgres, Grafana)
         run: infra/scripts/validate.sh
@@ -123,12 +123,12 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/lab-${{ matrix.app }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Имя образа в нижнем регистре
         run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Образ
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: apps/${{ matrix.app }}/Dockerfile
@@ -145,8 +145,8 @@ jobs:
             "$IMAGE:${{ github.sha }}"
           for i in $(seq 60); do curl -fs localhost:3000/up && exit 0; sleep 1; done
           docker logs app; exit 1
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -162,7 +162,7 @@ jobs:
         run: docker logs app | tail -200
       - name: Скриншоты и трейсы e2e
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-${{ matrix.app }}
           path: |
@@ -182,9 +182,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: pip install --quiet ansible-core
-      - uses: webfactory/ssh-agent@v0.9.0
+      - uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
       - name: Базы и env-файлы приложений, проверки Gatus (Ansible, теги app_env и obs)
@@ -229,14 +229,14 @@ jobs:
       KAMAL_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       URL: https://${{ matrix.app }}.${{ vars.BASE_DOMAIN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Пространство имён образов
         run: echo "IMAGE_NAMESPACE=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"
       - run: gem install kamal -v "~> 2.12" --no-document
-      - uses: webfactory/ssh-agent@v0.9.0
+      - uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
       - run: ssh-keyscan -H "$APP_HOST" >> ~/.ssh/known_hosts 2>/dev/null
@@ -250,8 +250,8 @@ jobs:
         id: deploy
         working-directory: apps/${{ matrix.app }}
         run: kamal deploy --skip-push --version="${{ github.sha }}"
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm

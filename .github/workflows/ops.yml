@@ -51,7 +51,7 @@ jobs:
       ISSUE: ${{ github.event.issue.number }}
       OUT: /tmp/ops.out
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Разобрать запрос
         env:
           IN_ACTION: ${{ inputs.action }}
@@ -97,7 +97,7 @@ jobs:
           esac
           : > "$OUT"
 
-      - uses: webfactory/ssh-agent@v0.9.0
+      - uses: webfactory/ssh-agent@v0.10.0
         if: contains(fromJSON('["status","logs","restart","rollback","sql-readonly","clickhouse-query","backup-now","set-sentry-dsn","send-panel-passwords"]'), env.ACTION)
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
