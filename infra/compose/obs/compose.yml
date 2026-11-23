@@ -15,7 +15,7 @@ services:
     depends_on: [clickhouse, grafana, bugsink, gatus, flipt]
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.10.3.7-alpine
+    image: clickhouse/clickhouse-server:26.10.4.207-alpine
     container_name: lab-clickhouse
     restart: unless-stopped
     environment:
@@ -37,7 +37,7 @@ services:
       retries: 10
 
   grafana:
-    image: grafana/grafana:12.3.0
+    image: grafana/grafana:13.3.1
     container_name: lab-grafana
     restart: unless-stopped
     user: "472"
