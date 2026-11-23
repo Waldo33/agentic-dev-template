@@ -50,7 +50,7 @@ jobs:
       ANSIBLE_SSH_USER: ${{ inputs.bootstrap && 'root' || 'deploy' }}
       ANSIBLE_FORCE_COLOR: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Есть ли куда разворачивать
         id: gate
         run: |
@@ -63,7 +63,7 @@ jobs:
       - if: steps.gate.outputs.go == 'true'
         run: pip install --quiet ansible-core
       - if: steps.gate.outputs.go == 'true'
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
       - name: Ключи хостов и список приложений
